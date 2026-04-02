@@ -97,6 +97,11 @@ class ModelBase:
     metadata_override: Path | None
     dir_model_card: Path
     remote_hf_model_id: str | None
+    turboquant_mode: str | None
+    turboquant_rotation_policy: str | None
+    turboquant_rotation_seed: int
+    turboquant_triality_mix: float | None
+    turboquant_artifact: Path | None
 
     # subclasses should define this!
     model_arch: gguf.MODEL_ARCH
@@ -117,7 +122,12 @@ class ModelBase:
                  small_first_shard: bool = False, hparams: dict[str, Any] | None = None, remote_hf_model_id: str | None = None,
                  disable_mistral_community_chat_template: bool = False,
                  sentence_transformers_dense_modules: bool = False,
-                 fuse_gate_up_exps: bool = False):
+                 fuse_gate_up_exps: bool = False,
+                 turboquant_mode: str | None = None,
+                 turboquant_rotation_policy: str | None = None,
+                 turboquant_rotation_seed: int = 0,
+                 turboquant_triality_mix: float | None = None,
+                 turboquant_artifact: Path | None = None):
         if type(self) is ModelBase or \
                 type(self) is TextModel or \
                 type(self) is MmprojModel:
@@ -137,6 +147,11 @@ class ModelBase:
         self.remote_hf_model_id = remote_hf_model_id
         self.sentence_transformers_dense_modules = sentence_transformers_dense_modules
         self.fuse_gate_up_exps = fuse_gate_up_exps
+        self.turboquant_mode = turboquant_mode
+        self.turboquant_rotation_policy = turboquant_rotation_policy
+        self.turboquant_rotation_seed = turboquant_rotation_seed
+        self.turboquant_triality_mix = turboquant_triality_mix
+        self.turboquant_artifact = turboquant_artifact
         self._gate_exp_buffer: dict[int, Tensor] = {}
         self._up_exp_buffer: dict[int, Tensor] = {}
         self.hparams = ModelBase.load_hparams(self.dir_model, self.is_mistral_format) if hparams is None else hparams
@@ -926,6 +941,42 @@ class ModelBase:
 
         logger.info("Set model quantization version")
         self.gguf_writer.add_quantization_version(gguf.GGML_QUANT_VERSION)
+
+        self.add_hypura_turboquant_metadata()
+
+    def add_hypura_turboquant_metadata(self) -> None:
+        if self.turboquant_mode is None:
+            return
+
+        self.gguf_writer.add_bool("hypura.turboquant.enabled", True)
+        self.gguf_writer.add_string("hypura.turboquant.mode", self.turboquant_mode)
+        self.gguf_writer.add_uint32("hypura.turboquant.rotation_seed", int(self.turboquant_rotation_seed))
+
+        if self.turboquant_rotation_policy is not None:
+            self.gguf_writer.add_string(
+                "hypura.turboquant.rotation_policy",
+                self.turboquant_rotation_policy,
+            )
+            triality_view_map = {
+                "triality_vector": "vector",
+                "triality_spinor_plus": "spinor_plus_proxy",
+                "triality_spinor_minus": "spinor_minus_proxy",
+            }
+            triality_view = triality_view_map.get(self.turboquant_rotation_policy)
+            if triality_view is not None:
+                self.gguf_writer.add_string("hypura.turboquant.triality_view", triality_view)
+
+        if self.turboquant_triality_mix is not None:
+            self.gguf_writer.add_float32(
+                "hypura.turboquant.triality_mix",
+                float(self.turboquant_triality_mix),
+            )
+
+        if self.turboquant_artifact is not None:
+            self.gguf_writer.add_string(
+                "hypura.turboquant.artifact",
+                str(self.turboquant_artifact),
+            )
 
     def write_vocab(self):
         raise NotImplementedError("write_vocab() must be implemented in subclasses")
@@ -12663,6 +12714,45 @@ def parse_args() -> argparse.Namespace:
         "--fuse-gate-up-exps", action="store_true",
         help="Fuse gate_exps and up_exps tensors into a single gate_up_exps tensor for MoE models.",
     )
+    parser.add_argument(
+        "--tq-mode",
+        type=str,
+        choices=["paper-key-only", "research-kv-split"],
+        default=None,
+        help="embed Hypura TurboQuant GGUF metadata for K-only runtime selection",
+    )
+    parser.add_argument(
+        "--tq-rotation-policy",
+        type=str,
+        choices=[
+            "random_haar",
+            "block_so8_static",
+            "block_so8_learned",
+            "triality_vector",
+            "triality_spinor_plus",
+            "triality_spinor_minus",
+        ],
+        default=None,
+        help="embed the preferred Hypura TurboQuant rotation policy into GGUF metadata",
+    )
+    parser.add_argument(
+        "--tq-rotation-seed",
+        type=int,
+        default=0,
+        help="embed the Hypura TurboQuant rotation seed into GGUF metadata",
+    )
+    parser.add_argument(
+        "--tq-triality-mix",
+        type=float,
+        default=None,
+        help="embed the Hypura Triality mix coefficient into GGUF metadata",
+    )
+    parser.add_argument(
+        "--tq-artifact",
+        type=Path,
+        default=None,
+        help="embed an optional Hypura TurboQuant artifact path into GGUF metadata",
+    )
 
     args = parser.parse_args()
     if not args.print_supported_models and args.model is None:
@@ -12802,7 +12892,12 @@ def main() -> None:
                                      small_first_shard=args.no_tensor_first_split,
                                      remote_hf_model_id=hf_repo_id, disable_mistral_community_chat_template=disable_mistral_community_chat_template,
                                      sentence_transformers_dense_modules=args.sentence_transformers_dense_modules,
-                                     fuse_gate_up_exps=args.fuse_gate_up_exps
+                                     fuse_gate_up_exps=args.fuse_gate_up_exps,
+                                     turboquant_mode=args.tq_mode,
+                                     turboquant_rotation_policy=args.tq_rotation_policy,
+                                     turboquant_rotation_seed=args.tq_rotation_seed,
+                                     turboquant_triality_mix=args.tq_triality_mix,
+                                     turboquant_artifact=args.tq_artifact,
                                      )
 
         if args.vocab_only:
