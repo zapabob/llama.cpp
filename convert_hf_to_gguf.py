@@ -12371,8 +12371,8 @@ def parse_args() -> argparse.Namespace:
         help="path to write to; default: based on input. {ftype} will be replaced by the outtype.",
     )
     parser.add_argument(
-        "--outtype", type=str, choices=["f32", "f16", "bf16", "q8_0", "tq1_0", "tq2_0", "auto"], default="auto",
-        help="output format - use f32 for float32, f16 for float16, bf16 for bfloat16, q8_0 for Q8_0, tq1_0 or tq2_0 for ternary, and auto for the highest-fidelity 16-bit float type",
+        "--outtype", type=str, choices=["f32", "f16", "bf16", "q8_0", "tq1_0", "tq2_0", "auto"], default="q8_0",
+        help="output format - use f32 for float32, f16 for float16, bf16 for bfloat16, q8_0 for Q8_0, tq1_0 or tq2_0 for ternary, and auto for the highest-fidelity 16-bit float type. Default: q8_0.",
     )
     parser.add_argument(
         "--bigendian", action="store_true",
@@ -12458,8 +12458,8 @@ def parse_args() -> argparse.Namespace:
         "--tq-mode",
         type=str,
         choices=["paper-key-only", "research-kv-split"],
-        default=None,
-        help="embed Hypura TurboQuant GGUF metadata for K-only runtime selection",
+        default="research-kv-split",
+        help="embed Hypura TurboQuant GGUF metadata for K-only runtime selection. Default: research-kv-split.",
     )
     parser.add_argument(
         "--tq-rotation-policy",
@@ -12472,8 +12472,8 @@ def parse_args() -> argparse.Namespace:
             "triality_spinor_plus",
             "triality_spinor_minus",
         ],
-        default=None,
-        help="embed the preferred Hypura TurboQuant rotation policy into GGUF metadata",
+        default="triality_spinor_plus",
+        help="embed the preferred Hypura TurboQuant rotation policy into GGUF metadata. Default: triality_spinor_plus.",
     )
     parser.add_argument(
         "--tq-rotation-seed",
