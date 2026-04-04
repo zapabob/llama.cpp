@@ -30,6 +30,18 @@ LLM inference in C/C++
 
 ----
 
+## zapabob fork: Related Repositories / 関連リポジトリ
+
+This fork integrates TrialityS08 rotation and Turboquant quantization for local VRAM reduction on consumer GPUs (RTX 3060+).
+
+| Repository | Role |
+|---|---|
+| [zapabob/multiscreen-pytorch](https://github.com/zapabob/multiscreen-pytorch) | PyTorch reference implementation of the Multiscreen architecture. KV window size (`s_w`) to be embedded as GGUF metadata for windowed KV cache |
+| [zapabob/Turboquant-CUDA](https://github.com/zapabob/Turboquant-CUDA) | KV cache quantization research (TrialityS08 rotation). Applied before GGUF conversion |
+| [zapabob/Hypura](https://github.com/zapabob/Hypura) | GPU/RAM/NVMe tiered inference scheduler. Loads GGUF produced by this fork |
+
+----
+
 ## Quick start
 
 Getting started with llama.cpp is straightforward. Here are several ways to install it on your machine:
