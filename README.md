@@ -30,6 +30,18 @@ LLM inference in C/C++
 
 ----
 
+## zapabob fork: Related Repositories / 関連リポジトリ
+
+This fork integrates TrialityS08 rotation and Turboquant quantization for local VRAM reduction on consumer GPUs (RTX 3060+).
+
+| Repository | Role |
+|---|---|
+| [zapabob/multiscreen-pytorch](https://github.com/zapabob/multiscreen-pytorch) | PyTorch reference implementation of the Multiscreen architecture. KV window size (`s_w`) to be embedded as GGUF metadata for windowed KV cache |
+| [zapabob/Turboquant-CUDA](https://github.com/zapabob/Turboquant-CUDA) | KV cache quantization research (TrialityS08 rotation). Applied before GGUF conversion |
+| [zapabob/Hypura](https://github.com/zapabob/Hypura) | GPU/RAM/NVMe tiered inference scheduler. Loads GGUF produced by this fork |
+
+----
+
 ## Quick start
 
 Getting started with llama.cpp is straightforward. Here are several ways to install it on your machine:
@@ -586,6 +598,35 @@ automatically. For example:
 ```console
 $ echo "source ~/.llama-completion.bash" >> ~/.bashrc
 ```
+## TurboQuant support (fork status)
+
+This fork includes TurboQuant-related integration for CUDA-based workflows.
+
+### What is included
+
+- TurboQuant conversion and runtime wiring for GGUF workflows
+- CUDA path/tooling integration for local inference
+- Compatibility checks for existing `llama-cli` / `llama-server` usage
+
+### Scope and notes
+
+- This is a fork-specific extension and may differ from upstream `ggml-org/llama.cpp`.
+- Behavior can vary by GPU architecture, driver, CUDA toolkit, and model quantization.
+
+## Measured results (local environment)
+
+### Test environment
+
+- OS: Windows 11
+- GPU: NVIDIA GeForce RTX 3060 (12 GB VRAM)
+- CUDA: 13.2
+- Build: `b8483-abe37ec28`
+- Model: `Qwen3.5-9B-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf` (Q4_K_M, ~5.23 GiB)
+
+### Runtime settings
+
+```bash
+llama-cli -m "C:\Users\USERPROFILE\Desktop\EasyNovelAssistant\EasyNovelAssistant\KoboldCpp\Qwen3.5-9B-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf" -ngl 99 -c 8192 -i
 
 ## Dependencies
 

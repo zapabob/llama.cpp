@@ -12934,6 +12934,8 @@ def parse_args() -> argparse.Namespace:
         choices=["paper-key-only", "research-kv-split"],
         default="research-kv-split",
         help="embed Hypura TurboQuant GGUF metadata for K-only runtime selection. Default: research-kv-split.",
+        default=None,
+        help="embed Hypura TurboQuant GGUF metadata for K-only runtime selection",
     )
     parser.add_argument(
         "--tq-rotation-policy",
@@ -12948,6 +12950,8 @@ def parse_args() -> argparse.Namespace:
         ],
         default="triality_spinor_plus",
         help="embed the preferred Hypura TurboQuant rotation policy into GGUF metadata. Default: triality_spinor_plus.",
+        default=None,
+        help="embed the preferred Hypura TurboQuant rotation policy into GGUF metadata",
     )
     parser.add_argument(
         "--tq-rotation-seed",
