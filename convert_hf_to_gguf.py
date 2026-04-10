@@ -13142,8 +13142,8 @@ def parse_args() -> argparse.Namespace:
             "triality_spinor_plus",
             "triality_spinor_minus",
         ],
-        default="triality_spinor_plus",
-        help="embed the preferred Hypura TurboQuant rotation policy into GGUF metadata. Default: triality_spinor_plus.",
+        default="triality_vector",
+        help="embed the preferred Hypura TurboQuant rotation policy into GGUF metadata. Default: triality_vector.",
     )
     parser.add_argument(
         "--tq-rotation-seed",
