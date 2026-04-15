@@ -37,11 +37,11 @@ Aligned local `main` handling with the current fork baseline without importing t
 # Commands run
 
 ```powershell
-git -C C:\Users\downl\Desktop\llama.cpp-zapabob worktree add C:\Users\downl\Desktop\llama.cpp-main-sync main
-Select-String -Path C:\Users\downl\Desktop\llama.cpp-main-sync\tools\mtmd\* -Pattern "GEMMA4A|TN_A_|gemma4a"
-git -C C:\Users\downl\Desktop\llama.cpp-zapabob diff --stat main -- README.md tools/mtmd/CMakeLists.txt tools/mtmd/clip-impl.h tools/mtmd/clip-model.h tools/mtmd/clip.cpp tools/mtmd/models/models.h tools/mtmd/models/gemma4a.cpp
-git -C C:\Users\downl\Desktop\llama.cpp-main-sync diff --check
-git -C C:\Users\downl\Desktop\llama.cpp-main-sync status --short --branch
+git -C <FORK_REPO_ROOT> worktree add <MAIN_WORKTREE> main
+Select-String -Path <MAIN_WORKTREE>\tools\mtmd\* -Pattern "GEMMA4A|TN_A_|gemma4a"
+git -C <FORK_REPO_ROOT> diff --stat main -- README.md tools/mtmd/CMakeLists.txt tools/mtmd/clip-impl.h tools/mtmd/clip-model.h tools/mtmd/clip.cpp tools/mtmd/models/models.h tools/mtmd/models/gemma4a.cpp
+git -C <MAIN_WORKTREE> diff --check
+git -C <MAIN_WORKTREE> status --short --branch
 ```
 
 # Test / verification results

@@ -30,15 +30,15 @@ LLM inference in C/C++
 
 ----
 
-## zapabob fork: Related Repositories / 関連リポジトリ
+## Fork-related Repositories / 関連リポジトリ
 
 This fork keeps local integration points for Triality SO(8), TurboQuant, and downstream GGUF runtime consumers.
 
 | Repository | Role |
 |---|---|
-| [zapabob/multiscreen-pytorch](https://github.com/zapabob/multiscreen-pytorch) | PyTorch reference for the Multiscreen architecture. KV window size (`s_w`) can be carried into GGUF metadata for windowed KV cache experiments. |
-| [zapabob/Turboquant-CUDA](https://github.com/zapabob/Turboquant-CUDA) | KV-cache quantization research and Triality SO(8) rotation work used before GGUF conversion. |
-| [zapabob/Hypura](https://github.com/zapabob/Hypura) | GPU/RAM/NVMe tiered inference scheduler that consumes GGUF artifacts from this fork. |
+| [multiscreen-pytorch](https://github.com/zapabob/multiscreen-pytorch) | PyTorch reference for the Multiscreen architecture. KV window size (`s_w`) can be carried into GGUF metadata for windowed KV cache experiments. |
+| [Turboquant-CUDA](https://github.com/zapabob/Turboquant-CUDA) | KV-cache quantization research and Triality SO(8) rotation work used before GGUF conversion. |
+| [Hypura](https://github.com/zapabob/Hypura) | GPU/RAM/NVMe tiered inference scheduler that consumes GGUF artifacts from this fork. |
 
 ----
 
@@ -627,7 +627,7 @@ This fork includes TurboQuant-related integration for CUDA-oriented GGUF workflo
 ### Runtime settings
 
 ```bash
-llama-cli -m "C:\Users\USERPROFILE\Desktop\EasyNovelAssistant\EasyNovelAssistant\KoboldCpp\Qwen3.5-9B-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf" -ngl 99 -c 8192 -i
+llama-cli -m "%USERPROFILE%\Desktop\EasyNovelAssistant\EasyNovelAssistant\KoboldCpp\Qwen3.5-9B-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf" -ngl 99 -c 8192 -i
 ```
 
 ## Dependencies
