@@ -6,6 +6,7 @@
 
 struct llama_turboquant_runtime_config {
     bool enabled = false;
+    std::string mode = "asym_q8_turbo4";
     bool so8_enabled = true;
     bool so8_learned = false;
     bool triality_enabled = true;
@@ -37,6 +38,8 @@ struct llama_turboquant_artifact {
 };
 
 llama_turboquant_runtime_config llama_turboquant_runtime_from_env();
+bool llama_turboquant_runtime_allows_k(const llama_turboquant_runtime_config & cfg);
+bool llama_turboquant_runtime_allows_v(const llama_turboquant_runtime_config & cfg);
 
 // Applies an in-place block-SO(8) rotation for vectors laid out as [n_vec, head_dim].
 // If head_dim is not a multiple of 8, this function leaves the tail unchanged.

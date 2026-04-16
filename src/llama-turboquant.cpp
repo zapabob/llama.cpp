@@ -32,6 +32,14 @@ uint32_t env_u32(const char * name, uint32_t fallback) {
     return val < 0 ? fallback : static_cast<uint32_t>(val);
 }
 
+std::string env_string(const char * name, const char * fallback) {
+    const char * v = std::getenv(name);
+    if (!v || v[0] == '\0') {
+        return std::string(fallback);
+    }
+    return std::string(v);
+}
+
 float sqr(float x) {
     return x * x;
 }
@@ -40,12 +48,27 @@ float sqr(float x) {
 llama_turboquant_runtime_config llama_turboquant_runtime_from_env() {
     llama_turboquant_runtime_config cfg;
     cfg.enabled = env_flag("LLAMA_TURBOQUANT", false);
+    cfg.mode = env_string("LLAMA_TURBOQUANT_MODE", "asym_q8_turbo4");
     cfg.so8_enabled = env_flag("LLAMA_TURBOQUANT_SO8", true);
     cfg.so8_learned = env_flag("LLAMA_TURBOQUANT_SO8_LEARNED", false);
     cfg.triality_enabled = env_flag("LLAMA_TURBOQUANT_TRIALITY", true);
     cfg.triality_mix = std::clamp(env_float("LLAMA_TURBOQUANT_TRIALITY_MIX", 0.5f), 0.0f, 1.0f);
     cfg.rotation_seed = env_u32("LLAMA_TURBOQUANT_ROTATION_SEED", 0);
     return cfg;
+}
+
+bool llama_turboquant_runtime_allows_k(const llama_turboquant_runtime_config & cfg) {
+    if (!cfg.enabled) {
+        return false;
+    }
+    return cfg.mode == "triality_vector";
+}
+
+bool llama_turboquant_runtime_allows_v(const llama_turboquant_runtime_config & cfg) {
+    if (!cfg.enabled) {
+        return false;
+    }
+    return cfg.mode == "asym_q8_turbo4" || cfg.mode == "asym_q8_turbo3";
 }
 
 void llama_turboquant_apply_so8_rotation(

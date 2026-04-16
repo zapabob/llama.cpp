@@ -36,7 +36,7 @@ llm_build_qwen35::llm_build_qwen35(const llama_model & model, const llm_graph_pa
             // Linear attention layer (gated delta net)
             cur = build_layer_attn_linear(inp->get_recr(), cur, il);
         } else {
-            // Full attention layer
+            // TurboQuant runtime support remains scoped to the full-attention path.
             cur = build_layer_attn(inp->get_attn(), cur, inp_pos, sections, il);
         }
 

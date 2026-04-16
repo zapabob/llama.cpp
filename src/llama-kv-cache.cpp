@@ -315,8 +315,9 @@ llama_kv_cache::llama_kv_cache(
     turboquant_cfg = llama_turboquant_runtime_from_env();
     if (turboquant_cfg.enabled) {
         LLAMA_LOG_INFO(
-            "%s: TurboQuant enabled (so8=%d, so8_learned=%d, triality=%d, mix=%.3f, seed=%u)\n",
+            "%s: TurboQuant enabled (mode=%s, so8=%d, so8_learned=%d, triality=%d, mix=%.3f, seed=%u)\n",
             __func__,
+            turboquant_cfg.mode.c_str(),
             turboquant_cfg.so8_enabled ? 1 : 0,
             turboquant_cfg.so8_learned ? 1 : 0,
             turboquant_cfg.triality_enabled ? 1 : 0,
@@ -1223,8 +1224,10 @@ ggml_tensor * llama_kv_cache::cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggm
         k = ggml_reshape_2d(ctx, k, n_embd_gqa, kv_size*n_stream);
     }
 
-    if (turboquant_cfg.enabled && !turboquant_logged_k) {
-        LLAMA_LOG_INFO("%s: TurboQuant K-path active at layer %d\n", __func__, il);
+    const bool qwen_full_attention_layer = !hparams.is_recurrent(il);
+    const bool turboquant_k_enabled = qwen_full_attention_layer && llama_turboquant_runtime_allows_k(turboquant_cfg);
+    if (turboquant_k_enabled && !turboquant_logged_k) {
+        LLAMA_LOG_INFO("%s: TurboQuant K-path active at layer %d (mode=%s)\n", __func__, il, turboquant_cfg.mode.c_str());
         turboquant_logged_k = true;
     }
 
@@ -1250,8 +1253,10 @@ ggml_tensor * llama_kv_cache::cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggm
 
     const int64_t n_stream = v->ne[2];
 
-    if (turboquant_cfg.enabled && !turboquant_logged_v) {
-        LLAMA_LOG_INFO("%s: TurboQuant V-path active at layer %d\n", __func__, il);
+    const bool qwen_full_attention_layer = !hparams.is_recurrent(il);
+    const bool turboquant_v_enabled = qwen_full_attention_layer && llama_turboquant_runtime_allows_v(turboquant_cfg);
+    if (turboquant_v_enabled && !turboquant_logged_v) {
+        LLAMA_LOG_INFO("%s: TurboQuant V-path active at layer %d (mode=%s)\n", __func__, il, turboquant_cfg.mode.c_str());
         turboquant_logged_v = true;
     }
 
