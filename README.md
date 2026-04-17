@@ -32,13 +32,13 @@ LLM inference in C/C++
 
 ## zapabob fork: Related Repositories / 関連リポジトリ
 
-This fork integrates TrialityS08 rotation and Turboquant quantization for local VRAM reduction on consumer GPUs (RTX 3060+).
+This fork keeps local integration points for Triality SO(8), TurboQuant, and downstream GGUF runtime consumers while targeting local VRAM reduction on consumer GPUs (RTX 3060+).
 
 | Repository | Role |
 |---|---|
-| [zapabob/multiscreen-pytorch](https://github.com/zapabob/multiscreen-pytorch) | PyTorch reference implementation of the Multiscreen architecture. KV window size (`s_w`) to be embedded as GGUF metadata for windowed KV cache |
-| [zapabob/Turboquant-CUDA](https://github.com/zapabob/Turboquant-CUDA) | KV cache quantization research (TrialityS08 rotation). Applied before GGUF conversion |
-| [zapabob/Hypura](https://github.com/zapabob/Hypura) | GPU/RAM/NVMe tiered inference scheduler. Loads GGUF produced by this fork |
+| [zapabob/multiscreen-pytorch](https://github.com/zapabob/multiscreen-pytorch) | PyTorch reference implementation of the Multiscreen architecture. KV window size (`s_w`) can be embedded as GGUF metadata for windowed KV cache experiments. |
+| [zapabob/Turboquant-CUDA](https://github.com/zapabob/Turboquant-CUDA) | KV cache quantization research and Triality SO(8) rotation work used before GGUF conversion. |
+| [zapabob/Hypura](https://github.com/zapabob/Hypura) | GPU/RAM/NVMe tiered inference scheduler that consumes GGUF artifacts produced by this fork. |
 
 ----
 
@@ -600,13 +600,13 @@ $ echo "source ~/.llama-completion.bash" >> ~/.bashrc
 ```
 ## TurboQuant support (fork status)
 
-This fork includes TurboQuant-related integration for CUDA-based workflows.
+This fork includes TurboQuant-related integration for CUDA-based GGUF workflows.
 
 ### What is included
 
 - TurboQuant conversion and runtime wiring for GGUF workflows
 - CUDA path/tooling integration for local inference
-- Compatibility checks for existing `llama-cli` / `llama-server` usage
+- Compatibility checks for existing `llama-cli` and `llama-server` usage
 
 ### Scope and notes
 
@@ -626,7 +626,8 @@ This fork includes TurboQuant-related integration for CUDA-based workflows.
 ### Runtime settings
 
 ```bash
-llama-cli -m "C:\Users\USERPROFILE\Desktop\EasyNovelAssistant\EasyNovelAssistant\KoboldCpp\Qwen3.5-9B-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf" -ngl 99 -c 8192 -i
+llama-cli -m "%USERPROFILE%\Desktop\EasyNovelAssistant\EasyNovelAssistant\KoboldCpp\Qwen3.5-9B-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf" -ngl 99 -c 8192 -i
+```
 
 ## Dependencies
 
