@@ -948,23 +948,99 @@ class ModelBase:
         if self.turboquant_mode is None:
             return
 
+        rotation_policy_alias = self.turboquant_rotation_policy or "triality_vector"
+        triality_view_map = {
+            "triality_vector": "vector",
+            "triality_spinor_plus": "spinor_plus_proxy",
+            "triality_spinor_minus": "spinor_minus_proxy",
+        }
+        triality_view = triality_view_map.get(rotation_policy_alias)
+        artifact_rotation_policy = {
+            "triality_vector": "block_so8_learned",
+            "triality_spinor_plus": "block_so8_learned",
+            "triality_spinor_minus": "block_so8_learned",
+        }.get(rotation_policy_alias, rotation_policy_alias)
+        triality_mode = "triality_proxy" if triality_view is not None else "disabled"
+
+        if self.turboquant_mode == "research-kv-split":
+            total_bits = 3.5
+            qjl_bits = 1
+            stage1_effective_bits = 2.25
+            runtime_bits_per_channel = 3.25
+            stage1_allocation_scheme = "magnitude-topk"
+        else:
+            total_bits = 2.0
+            qjl_bits = 1
+            stage1_effective_bits = 1.0
+            runtime_bits_per_channel = 2.0
+            stage1_allocation_scheme = "uniform"
+
+        head_count = self.find_hparam(["num_attention_heads", "n_heads", "num_heads"], optional=True)
+        hidden_size = self.find_hparam(["hidden_size", "n_embd", "d_model"], optional=True)
+        if (
+            isinstance(head_count, int)
+            and isinstance(hidden_size, int)
+            and head_count > 0
+            and hidden_size > 0
+            and hidden_size % head_count == 0
+        ):
+            qjl_dim = hidden_size // head_count
+        else:
+            qjl_dim = 128
+
+        n_layers = max(int(self.block_count), 1)
+        self.gguf_writer.add_uint32("tq_schema_version", 1)
+        self.gguf_writer.add_array("tq_total_bits", [float(total_bits)] * n_layers)
+        self.gguf_writer.add_array(
+            "tq_runtime_bits_per_channel",
+            [float(runtime_bits_per_channel)] * n_layers,
+        )
+        self.gguf_writer.add_array(
+            "tq_stage1_effective_bits",
+            [float(stage1_effective_bits)] * n_layers,
+        )
+        self.gguf_writer.add_array("tq_qjl_bits", [int(qjl_bits)] * n_layers)
+        self.gguf_writer.add_array("tq_qjl_dim", [int(qjl_dim)] * n_layers)
+        self.gguf_writer.add_array(
+            "tq_rotation_policy",
+            [artifact_rotation_policy] * n_layers,
+        )
+        self.gguf_writer.add_array(
+            "tq_rotation_seed",
+            [int(self.turboquant_rotation_seed)] * n_layers,
+        )
+        self.gguf_writer.add_array("tq_qjl_seed", [1] * n_layers)
+        self.gguf_writer.add_array("tq_triality_mode", [triality_mode] * n_layers)
+        self.gguf_writer.add_array(
+            "tq_triality_view",
+            [triality_view or "none"] * n_layers,
+        )
+        self.gguf_writer.add_array(
+            "tq_stage1_allocation_scheme",
+            [stage1_allocation_scheme] * n_layers,
+        )
+        self.gguf_writer.add_array(
+            "tq_stage1_bitwidth_payload_dtype",
+            ["uint8"] * n_layers,
+        )
+        self.gguf_writer.add_array("tq_norm_dtype", ["float32"] * n_layers)
+        self.gguf_writer.add_array(
+            "tq_sign_pack_format",
+            ["int8_unpacked_binary"] * n_layers,
+        )
+
+        self.gguf_writer.add_uint32("hypura.turboquant.schema_version", 1)
         self.gguf_writer.add_bool("hypura.turboquant.enabled", True)
         self.gguf_writer.add_string("hypura.turboquant.mode", self.turboquant_mode)
         self.gguf_writer.add_uint32("hypura.turboquant.rotation_seed", int(self.turboquant_rotation_seed))
+        self.gguf_writer.add_string("hypura.turboquant.triality_mode", triality_mode)
 
-        if self.turboquant_rotation_policy is not None:
-            self.gguf_writer.add_string(
-                "hypura.turboquant.rotation_policy",
-                self.turboquant_rotation_policy,
-            )
-            triality_view_map = {
-                "triality_vector": "vector",
-                "triality_spinor_plus": "spinor_plus_proxy",
-                "triality_spinor_minus": "spinor_minus_proxy",
-            }
-            triality_view = triality_view_map.get(self.turboquant_rotation_policy)
-            if triality_view is not None:
-                self.gguf_writer.add_string("hypura.turboquant.triality_view", triality_view)
+        self.gguf_writer.add_string(
+            "hypura.turboquant.rotation_policy",
+            rotation_policy_alias,
+        )
+        if triality_view is not None:
+            self.gguf_writer.add_string("hypura.turboquant.triality_view", triality_view)
 
         if self.turboquant_triality_mix is not None:
             self.gguf_writer.add_float32(
