@@ -30,15 +30,15 @@ LLM inference in C/C++
 
 ----
 
-## Fork-related Repositories / 関連リポジトリ
+## zapabob fork: Related Repositories / 関連リポジトリ
 
-This fork keeps local integration points for Triality SO(8), TurboQuant, and downstream GGUF runtime consumers.
+This fork keeps local integration points for Triality SO(8), TurboQuant, and downstream GGUF runtime consumers while targeting local VRAM reduction on consumer GPUs (RTX 3060+).
 
 | Repository | Role |
 |---|---|
-| [multiscreen-pytorch](https://github.com/zapabob/multiscreen-pytorch) | PyTorch reference for the Multiscreen architecture. KV window size (`s_w`) can be carried into GGUF metadata for windowed KV cache experiments. |
-| [Turboquant-CUDA](https://github.com/zapabob/Turboquant-CUDA) | KV-cache quantization research and Triality SO(8) rotation work used before GGUF conversion. |
-| [Hypura](https://github.com/zapabob/Hypura) | GPU/RAM/NVMe tiered inference scheduler that consumes GGUF artifacts from this fork. |
+| [zapabob/multiscreen-pytorch](https://github.com/zapabob/multiscreen-pytorch) | PyTorch reference implementation of the Multiscreen architecture. KV window size (`s_w`) can be embedded as GGUF metadata for windowed KV cache experiments. |
+| [zapabob/Turboquant-CUDA](https://github.com/zapabob/Turboquant-CUDA) | KV cache quantization research and Triality SO(8) rotation work used before GGUF conversion. |
+| [zapabob/Hypura](https://github.com/zapabob/Hypura) | GPU/RAM/NVMe tiered inference scheduler that consumes GGUF artifacts produced by this fork. |
 
 ----
 
@@ -598,15 +598,14 @@ automatically. For example:
 ```console
 $ echo "source ~/.llama-completion.bash" >> ~/.bashrc
 ```
-
 ## TurboQuant support (fork status)
 
-This fork includes TurboQuant-related integration for CUDA-oriented GGUF workflows.
+This fork includes TurboQuant-related integration for CUDA-based GGUF workflows.
 
 ### What is included
 
-- TurboQuant conversion and runtime wiring for GGUF-based flows
-- CUDA path and tooling integration for local inference
+- TurboQuant conversion and runtime wiring for GGUF workflows
+- CUDA path/tooling integration for local inference
 - Compatibility checks for existing `llama-cli` and `llama-server` usage
 
 ### Scope and notes
