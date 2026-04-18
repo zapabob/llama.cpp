@@ -17,6 +17,21 @@ static const size_t kiB = 1024;
 static const size_t MiB = 1024*kiB;
 static const size_t GiB = 1024*MiB;
 
+static bool llama_model_loader_is_aux_tensor(const std::string & name) {
+    return name.rfind("tq.", 0) == 0;
+}
+
+template<typename TWeightsMap>
+static int llama_model_loader_count_aux_tensors(const TWeightsMap & weights_map) {
+    int count = 0;
+    for (const auto & entry : weights_map) {
+        if (llama_model_loader_is_aux_tensor(entry.first)) {
+            ++count;
+        }
+    }
+    return count;
+}
+
 const char * llama_file_version_name(llama_fver version) {
     switch (version) {
         case GGUF_FILE_VERSION_V1: return "GGUF V1 (support until nov 2023)";
@@ -697,12 +712,17 @@ llama_model_loader::llama_model_loader(
     }
 
     n_kv      = gguf_get_n_kv(metadata);
-    n_tensors = weights_map.size();
+    const int n_aux_tensors = llama_model_loader_count_aux_tensors(weights_map);
+    n_tensors = static_cast<int>(weights_map.size()) - n_aux_tensors;
 
     fver = (enum llama_fver) gguf_get_version(metadata);
 
     LLAMA_LOG_INFO("%s: loaded meta data with %d key-value pairs and %d tensors from %s (version %s)\n",
             __func__, n_kv, n_tensors, fname.empty() ? "(file*)" : fname.c_str(), llama_file_version_name(fver));
+    if (n_aux_tensors > 0) {
+        LLAMA_LOG_INFO("%s: ignoring %d auxiliary tensor(s) with `tq.` prefix for model tensor accounting\n",
+                __func__, n_aux_tensors);
+    }
 
     // determine file type based on the number of tensors for each quantization and print meta data
     // TODO: make optional
