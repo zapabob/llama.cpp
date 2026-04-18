@@ -70,6 +70,21 @@ static void populate_complete_metadata(gguf_context * ctx, uint32_t n_layers = 2
     set_str_array(ctx, "tq_sign_pack_format", sign_pack_format);
 }
 
+static void populate_public_weight_metadata(gguf_context * ctx) {
+    gguf_set_val_bool(ctx, "hypura.turboquant.weight.enabled", true);
+    gguf_set_val_str(ctx, "hypura.turboquant.weight.source_ftype", "q8_0");
+    gguf_set_val_str(ctx, "hypura.turboquant.weight.policy", "qwen35-full-attention-ffn");
+    gguf_set_val_str(
+        ctx,
+        "hypura.turboquant.weight.protected_roles",
+        "[\"embedding\",\"norm\",\"output_head\",\"recurrent_state\"]");
+    gguf_set_val_str(ctx, "hypura.turboquant.weight.protected_layers", "[0,1,30,31]");
+    gguf_set_val_str(ctx, "hypura.turboquant.weight.modality_scope", "text-only");
+    gguf_set_val_str(ctx, "hypura.turboquant.weight.payload_format", "json-inline-v1");
+    gguf_set_val_u64(ctx, "hypura.turboquant.weight.payload_bytes", 32);
+    gguf_set_val_str(ctx, "hypura.turboquant.weight.payload_json", "{\"enabled\":true}");
+}
+
 } // namespace
 
 int main() {
@@ -87,6 +102,7 @@ int main() {
     t.test("llama_turboquant_load_gguf_metadata_parses_complete_layer_arrays", [](testing & t) {
         auto ctx = make_ctx();
         populate_complete_metadata(ctx.get(), 2);
+        populate_public_weight_metadata(ctx.get());
 
         llama_turboquant_gguf_metadata metadata;
         std::string error;
@@ -97,6 +113,12 @@ int main() {
         t.assert_true("runtime bits preserved", std::fabs(metadata.layers[0].runtime_bits_per_channel - 3.25f) < 1e-6f);
         t.assert_equal("triality mode", std::string("triality_proxy"), metadata.layers[1].triality_mode);
         t.assert_equal("triality view", std::string("vector"), metadata.layers[1].triality_view);
+        t.assert_true("weight metadata enabled", metadata.weight.enabled);
+        t.assert_equal("weight source ftype", std::string("q8_0"), metadata.weight.source_ftype);
+        t.assert_equal("weight policy", std::string("qwen35-full-attention-ffn"), metadata.weight.policy);
+        t.assert_equal("weight modality scope", std::string("text-only"), metadata.weight.modality_scope);
+        t.assert_equal("weight payload format", std::string("json-inline-v1"), metadata.weight.payload_format);
+        t.assert_equal("weight payload bytes", uint64_t(32), metadata.weight.payload_bytes);
     });
 
     t.test("llama_turboquant_load_gguf_metadata_rejects_missing_required_key", [](testing & t) {

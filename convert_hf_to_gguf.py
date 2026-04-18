@@ -102,6 +102,12 @@ class ModelBase:
     turboquant_rotation_seed: int
     turboquant_triality_mix: float | None
     turboquant_artifact: Path | None
+    turboquant_weight_enabled: bool
+    turboquant_weight_source_ftype: str | None
+    turboquant_weight_policy: str | None
+    turboquant_weight_protected_roles: str | None
+    turboquant_weight_protected_layers: str | None
+    turboquant_weight_modality_scope: str | None
 
     # subclasses should define this!
     model_arch: gguf.MODEL_ARCH
@@ -127,7 +133,13 @@ class ModelBase:
                  turboquant_rotation_policy: str | None = None,
                  turboquant_rotation_seed: int = 0,
                  turboquant_triality_mix: float | None = None,
-                 turboquant_artifact: Path | None = None):
+                 turboquant_artifact: Path | None = None,
+                 turboquant_weight_enabled: bool = True,
+                 turboquant_weight_source_ftype: str | None = None,
+                 turboquant_weight_policy: str | None = None,
+                 turboquant_weight_protected_roles: str | None = None,
+                 turboquant_weight_protected_layers: str | None = None,
+                 turboquant_weight_modality_scope: str | None = None):
         if type(self) is ModelBase or \
                 type(self) is TextModel or \
                 type(self) is MmprojModel:
@@ -152,6 +164,12 @@ class ModelBase:
         self.turboquant_rotation_seed = turboquant_rotation_seed
         self.turboquant_triality_mix = turboquant_triality_mix
         self.turboquant_artifact = turboquant_artifact
+        self.turboquant_weight_enabled = turboquant_weight_enabled
+        self.turboquant_weight_source_ftype = turboquant_weight_source_ftype
+        self.turboquant_weight_policy = turboquant_weight_policy
+        self.turboquant_weight_protected_roles = turboquant_weight_protected_roles
+        self.turboquant_weight_protected_layers = turboquant_weight_protected_layers
+        self.turboquant_weight_modality_scope = turboquant_weight_modality_scope
         self._gate_exp_buffer: dict[int, Tensor] = {}
         self._up_exp_buffer: dict[int, Tensor] = {}
         self.hparams = ModelBase.load_hparams(self.dir_model, self.is_mistral_format) if hparams is None else hparams
@@ -948,6 +966,11 @@ class ModelBase:
         if self.turboquant_mode is None:
             return
 
+        public_mode = (
+            "triality-proxy-so8-pareto"
+            if self.turboquant_mode == "research-kv-split"
+            else "paper-faithful"
+        )
         rotation_policy_alias = self.turboquant_rotation_policy or "triality_vector"
         triality_view_map = {
             "triality_vector": "vector",
@@ -961,6 +984,13 @@ class ModelBase:
             "triality_spinor_minus": "block_so8_learned",
         }.get(rotation_policy_alias, rotation_policy_alias)
         triality_mode = "triality_proxy" if triality_view is not None else "disabled"
+        model_family = self.remote_hf_model_id or self.model_name or self.dir_model.name
+        normalized_family = model_family.lower()
+        weight_source_ftype = (self.turboquant_weight_source_ftype or "q8_0").lower()
+        if weight_source_ftype not in {"bf16", "f16", "q8_0"}:
+            raise ValueError(
+                f"Unsupported --tq-weight-source-ftype {weight_source_ftype!r}; expected bf16, f16, or q8_0"
+            )
 
         if self.turboquant_mode == "research-kv-split":
             total_bits = 3.5
@@ -987,6 +1017,67 @@ class ModelBase:
             qjl_dim = hidden_size // head_count
         else:
             qjl_dim = 128
+
+        if self.block_count > 0:
+            boundary_layers = sorted(
+                {
+                    0,
+                    min(1, self.block_count - 1),
+                    max(0, self.block_count - 2),
+                    self.block_count - 1,
+                }
+            )
+        else:
+            boundary_layers = []
+
+        if self.turboquant_weight_protected_layers is not None:
+            protected_layers = json.loads(self.turboquant_weight_protected_layers)
+        else:
+            protected_layers = boundary_layers
+
+        if self.turboquant_weight_protected_roles is not None:
+            protected_roles = json.loads(self.turboquant_weight_protected_roles)
+        elif "qwen" in normalized_family and "3.5-9b" in normalized_family:
+            protected_roles = ["embedding", "norm", "output_head", "recurrent_state"]
+        elif "gemma" in normalized_family and "e4b" in normalized_family:
+            protected_roles = [
+                "vision_encoder",
+                "audio_encoder",
+                "projector",
+                "per_layer_multimodal_embedding",
+                "embedding",
+                "norm",
+                "output_head",
+            ]
+        else:
+            protected_roles = ["embedding", "norm", "output_head"]
+
+        if self.turboquant_weight_policy is not None:
+            weight_policy = self.turboquant_weight_policy
+        elif "qwen" in normalized_family and "3.5-9b" in normalized_family:
+            weight_policy = "qwen35-full-attention-ffn"
+        elif "gemma" in normalized_family and "e4b" in normalized_family:
+            weight_policy = "gemma4-e4b-shared-decoder-hybrid"
+        else:
+            weight_policy = "shared-decoder-role-aware"
+
+        if self.turboquant_weight_modality_scope is not None:
+            weight_modality_scope = self.turboquant_weight_modality_scope
+        elif "gemma" in normalized_family and "e4b" in normalized_family:
+            weight_modality_scope = "full-multimodal"
+        else:
+            weight_modality_scope = "text-only"
+
+        weight_payload = {
+            "enabled": bool(self.turboquant_weight_enabled),
+            "model_family": model_family,
+            "source_ftype": weight_source_ftype,
+            "policy": weight_policy,
+            "protected_roles": protected_roles,
+            "protected_layers": protected_layers,
+            "modality_scope": weight_modality_scope,
+        }
+        weight_payload_json = json.dumps(weight_payload, sort_keys=True, separators=(",", ":"))
 
         n_layers = max(int(self.block_count), 1)
         self.gguf_writer.add_uint32("tq_schema_version", 1)
@@ -1031,7 +1122,7 @@ class ModelBase:
 
         self.gguf_writer.add_uint32("hypura.turboquant.schema_version", 1)
         self.gguf_writer.add_bool("hypura.turboquant.enabled", True)
-        self.gguf_writer.add_string("hypura.turboquant.mode", self.turboquant_mode)
+        self.gguf_writer.add_string("hypura.turboquant.mode", public_mode)
         self.gguf_writer.add_uint32("hypura.turboquant.rotation_seed", int(self.turboquant_rotation_seed))
         self.gguf_writer.add_string("hypura.turboquant.triality_mode", triality_mode)
 
@@ -1053,6 +1144,43 @@ class ModelBase:
                 "hypura.turboquant.artifact",
                 str(self.turboquant_artifact),
             )
+
+        self.gguf_writer.add_bool(
+            "hypura.turboquant.weight.enabled",
+            bool(self.turboquant_weight_enabled),
+        )
+        self.gguf_writer.add_string(
+            "hypura.turboquant.weight.source_ftype",
+            weight_source_ftype,
+        )
+        self.gguf_writer.add_string(
+            "hypura.turboquant.weight.policy",
+            weight_policy,
+        )
+        self.gguf_writer.add_string(
+            "hypura.turboquant.weight.protected_roles",
+            json.dumps(protected_roles, separators=(",", ":")),
+        )
+        self.gguf_writer.add_string(
+            "hypura.turboquant.weight.protected_layers",
+            json.dumps(protected_layers, separators=(",", ":")),
+        )
+        self.gguf_writer.add_string(
+            "hypura.turboquant.weight.modality_scope",
+            weight_modality_scope,
+        )
+        self.gguf_writer.add_string(
+            "hypura.turboquant.weight.payload_format",
+            "json-inline-v1",
+        )
+        self.gguf_writer.add_uint64(
+            "hypura.turboquant.weight.payload_bytes",
+            len(weight_payload_json.encode("utf-8")),
+        )
+        self.gguf_writer.add_string(
+            "hypura.turboquant.weight.payload_json",
+            weight_payload_json,
+        )
 
     def write_vocab(self):
         raise NotImplementedError("write_vocab() must be implemented in subclasses")
@@ -13389,7 +13517,12 @@ def parse_args() -> argparse.Namespace:
         type=str,
         choices=["paper-key-only", "research-kv-split"],
         default="research-kv-split",
-        help="embed Hypura TurboQuant GGUF metadata for K-only runtime selection. Default: research-kv-split.",
+        help=(
+            "choose the internal TurboQuant export preset. "
+            "The embedded GGUF public mode is written as "
+            "paper-faithful or triality-proxy-so8-pareto. "
+            "Default: research-kv-split."
+        ),
     )
     parser.add_argument(
         "--tq-rotation-policy",
@@ -13422,6 +13555,37 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         help="embed an optional Hypura TurboQuant artifact path into GGUF metadata",
+    )
+    parser.add_argument(
+        "--tq-weight-source-ftype",
+        type=str,
+        choices=["bf16", "f16", "q8_0"],
+        default="q8_0",
+        help="embed the canonical source ftype for weight TurboQuant planning. Default: q8_0.",
+    )
+    parser.add_argument(
+        "--tq-weight-policy",
+        type=str,
+        default=None,
+        help="embed the weight TurboQuant policy label into GGUF metadata",
+    )
+    parser.add_argument(
+        "--tq-weight-protected-roles",
+        type=str,
+        default=None,
+        help="embed a JSON list of protected weight roles into GGUF metadata",
+    )
+    parser.add_argument(
+        "--tq-weight-protected-layers",
+        type=str,
+        default=None,
+        help="embed a JSON list of protected layer indices into GGUF metadata",
+    )
+    parser.add_argument(
+        "--tq-weight-modality-scope",
+        type=str,
+        default=None,
+        help="embed the intended modality scope for weight TurboQuant planning",
     )
 
     args = parser.parse_args()
@@ -13574,6 +13738,11 @@ def main() -> None:
                                      turboquant_rotation_seed=args.tq_rotation_seed,
                                      turboquant_triality_mix=args.tq_triality_mix,
                                      turboquant_artifact=args.tq_artifact,
+                                     turboquant_weight_source_ftype=args.tq_weight_source_ftype,
+                                     turboquant_weight_policy=args.tq_weight_policy,
+                                     turboquant_weight_protected_roles=args.tq_weight_protected_roles,
+                                     turboquant_weight_protected_layers=args.tq_weight_protected_layers,
+                                     turboquant_weight_modality_scope=args.tq_weight_modality_scope,
                                      )
 
         if args.vocab_only:

@@ -66,10 +66,23 @@ struct llama_turboquant_gguf_layer_metadata {
     std::string sign_pack_format;
 };
 
+struct llama_turboquant_weight_gguf_metadata {
+    bool enabled = false;
+    std::string source_ftype;
+    std::string policy;
+    std::string protected_roles;
+    std::string protected_layers;
+    std::string modality_scope;
+    std::string payload_format;
+    uint64_t payload_bytes = 0;
+    std::string payload_json;
+};
+
 struct llama_turboquant_gguf_metadata {
     bool present = false;
     uint32_t schema_version = 0;
     std::vector<llama_turboquant_gguf_layer_metadata> layers;
+    llama_turboquant_weight_gguf_metadata weight;
 };
 
 struct llama_turboquant_artifact {
