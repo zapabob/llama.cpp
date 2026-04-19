@@ -3,6 +3,7 @@
 #include "gguf.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <fstream>
@@ -55,6 +56,8 @@ constexpr uint32_t TQ4_1S_BLOCK_BYTES = 20;
 constexpr uint32_t TQ4_1S_HALF_BLOCK = 16;
 constexpr float TQ4_1S_INV_SQRT32 = 0.17677669529663688f;
 constexpr uint32_t TRIALITY_CODEBOOK_SIZE = 3;
+constexpr uint32_t TRIALITY_ROTATION_BLOCK_SIZE = 8;
+constexpr const char * TRIALITY_RUNTIME_MODE = "key_only_block_so8_triality_vector";
 
 constexpr float kTq4CentroidsWeight[16] = {
     -2.732590f, -2.069017f, -1.618046f, -1.256231f,
@@ -77,6 +80,8 @@ constexpr float kTqWeightSigns[32] = {
 };
 
 bool set_error(std::string * error, const std::string & message);
+std::string canonical_triality_view(std::string view);
+std::string canonical_runtime_mode(std::string mode);
 
 bool validate_tq4_reference_shape(
     const size_t value_count,
@@ -251,6 +256,15 @@ bool parse_artifact_metadata(
         return false;
     }
 
+    metadata.triality_mode = canonical_runtime_mode(metadata.triality_mode);
+    metadata.triality_view = canonical_triality_view(metadata.triality_view);
+    if (metadata.triality_mode != TRIALITY_RUNTIME_MODE) {
+        return set_error(error, "artifact metadata uses unsupported triality mode");
+    }
+    if (metadata.triality_view != "vector") {
+        return set_error(error, "artifact metadata uses unsupported triality view");
+    }
+
     return validate_runtime_bits(
         metadata.stage1_effective_bits,
         metadata.qjl_bits,
@@ -358,6 +372,36 @@ bool read_optional_u64(
     return true;
 }
 
+bool read_optional_u32(
+    const gguf_context * ctx,
+    const char * key,
+    uint32_t & out) {
+    const int64_t key_id = gguf_find_key(ctx, key);
+    if (key_id < 0) {
+        return false;
+    }
+    if (gguf_get_kv_type(ctx, key_id) != GGUF_TYPE_UINT32) {
+        return false;
+    }
+    out = gguf_get_val_u32(ctx, key_id);
+    return true;
+}
+
+bool read_optional_f32(
+    const gguf_context * ctx,
+    const char * key,
+    float & out) {
+    const int64_t key_id = gguf_find_key(ctx, key);
+    if (key_id < 0) {
+        return false;
+    }
+    if (gguf_get_kv_type(ctx, key_id) != GGUF_TYPE_FLOAT32) {
+        return false;
+    }
+    out = gguf_get_val_f32(ctx, key_id);
+    return true;
+}
+
 bool read_optional_string(
     const gguf_context * ctx,
     const char * key,
@@ -377,10 +421,12 @@ bool read_optional_string(
 llama_turboquant_runtime_config llama_turboquant_runtime_from_env() {
     llama_turboquant_runtime_config cfg;
     cfg.enabled = env_flag("LLAMA_TURBOQUANT", false);
-    cfg.mode = env_string("LLAMA_TURBOQUANT_MODE", "key_only_block_so8_triality_vector");
+    cfg.mode = canonical_runtime_mode(env_string("LLAMA_TURBOQUANT_MODE", TRIALITY_RUNTIME_MODE));
+    cfg.triality_view = canonical_triality_view(env_string("LLAMA_TURBOQUANT_TRIALITY_VIEW", "vector"));
     cfg.so8_enabled = env_flag("LLAMA_TURBOQUANT_SO8", true);
     cfg.so8_learned = env_flag("LLAMA_TURBOQUANT_SO8_LEARNED", false);
     cfg.triality_enabled = env_flag("LLAMA_TURBOQUANT_TRIALITY", true);
+    cfg.require_artifact = env_flag("LLAMA_TURBOQUANT_REQUIRE_ARTIFACT", false);
     cfg.triality_mix = std::clamp(env_float("LLAMA_TURBOQUANT_TRIALITY_MIX", 0.5f), 0.0f, 1.0f);
     cfg.rotation_seed = env_u32("LLAMA_TURBOQUANT_ROTATION_SEED", 0);
     return cfg;
@@ -390,8 +436,36 @@ bool llama_turboquant_runtime_allows_k(const llama_turboquant_runtime_config & c
     if (!cfg.enabled) {
         return false;
     }
-    return cfg.mode == "triality_vector" || cfg.mode == "key_only_block_so8_triality_vector";
+    return canonical_runtime_mode(cfg.mode) == TRIALITY_RUNTIME_MODE;
 }
+
+namespace {
+std::string canonical_triality_view(std::string view) {
+    std::transform(view.begin(), view.end(), view.begin(), [](unsigned char c) {
+        return c == '-' ? '_' : static_cast<char>(std::tolower(c));
+    });
+    if (view == "vector") {
+        return "vector";
+    }
+    if (view == "plus" || view == "spinor_plus_proxy") {
+        return "spinor_plus_proxy";
+    }
+    if (view == "minus" || view == "spinor_minus_proxy") {
+        return "spinor_minus_proxy";
+    }
+    return view;
+}
+
+std::string canonical_runtime_mode(std::string mode) {
+    std::transform(mode.begin(), mode.end(), mode.begin(), [](unsigned char c) {
+        return c == '-' ? '_' : static_cast<char>(std::tolower(c));
+    });
+    if (mode == "triality_vector" || mode == "research_kv_split" || mode == TRIALITY_RUNTIME_MODE) {
+        return TRIALITY_RUNTIME_MODE;
+    }
+    return mode;
+}
+} // namespace
 
 bool llama_turboquant_runtime_allows_v(const llama_turboquant_runtime_config & cfg) {
     if (!cfg.enabled) {
@@ -460,8 +534,8 @@ bool llama_turboquant_load_gguf_metadata(
         layer.rotation_policy = rotation_policy[i];
         layer.rotation_seed = rotation_seed[i];
         layer.qjl_seed = qjl_seed[i];
-        layer.triality_mode = triality_mode[i];
-        layer.triality_view = triality_view[i];
+        layer.triality_mode = canonical_runtime_mode(triality_mode[i]);
+        layer.triality_view = canonical_triality_view(triality_view[i]);
         layer.stage1_allocation_scheme = stage1_allocation_scheme[i];
         layer.stage1_bitwidth_payload_dtype = stage1_bitwidth_payload_dtype[i];
         layer.norm_dtype = norm_dtype[i];
@@ -477,6 +551,16 @@ bool llama_turboquant_load_gguf_metadata(
             metadata.layers.clear();
             return false;
         }
+        if (layer.triality_mode != TRIALITY_RUNTIME_MODE) {
+            metadata.present = false;
+            metadata.layers.clear();
+            return set_error(error, std::string("GGUF TurboQuant metadata layer ") + std::to_string(i) + " uses unsupported triality mode");
+        }
+        if (layer.triality_view != "vector") {
+            metadata.present = false;
+            metadata.layers.clear();
+            return set_error(error, std::string("GGUF TurboQuant metadata layer ") + std::to_string(i) + " uses unsupported triality view");
+        }
     }
 
     read_optional_bool(ctx, "hypura.turboquant.weight.enabled", metadata.weight.enabled);
@@ -489,6 +573,60 @@ bool llama_turboquant_load_gguf_metadata(
     read_optional_u64(ctx, "hypura.turboquant.weight.payload_bytes", metadata.weight.payload_bytes);
     read_optional_string(ctx, "hypura.turboquant.weight.payload_json", metadata.weight.payload_json);
 
+    std::string codec;
+    uint32_t rotation_block_size = 0;
+    float orthogonality_error = 0.0f;
+    float determinant_error_max = 0.0f;
+    std::string runtime_mode;
+    std::string public_triality_view;
+    bool view_bundle_complete = false;
+
+    if (!read_optional_string(ctx, "hypura.turboquant.codec", codec) ||
+        !read_optional_u32(ctx, "hypura.turboquant.rotation_block_size", rotation_block_size) ||
+        !read_optional_f32(ctx, "hypura.turboquant.orthogonality_error", orthogonality_error) ||
+        !read_optional_f32(ctx, "hypura.turboquant.determinant_error_max", determinant_error_max) ||
+        !read_optional_string(ctx, "hypura.turboquant.runtime_mode", runtime_mode) ||
+        !read_optional_string(ctx, "hypura.turboquant.triality_view", public_triality_view) ||
+        !read_optional_bool(ctx, "hypura.turboquant.view_bundle_complete", view_bundle_complete)) {
+        metadata.present = false;
+        metadata.layers.clear();
+        return set_error(error, "missing required hypura.turboquant shared ABI metadata");
+    }
+
+    if (codec != "tq4_1s") {
+        metadata.present = false;
+        metadata.layers.clear();
+        return set_error(error, "hypura.turboquant.codec must be 'tq4_1s'");
+    }
+    if (rotation_block_size != TRIALITY_ROTATION_BLOCK_SIZE) {
+        metadata.present = false;
+        metadata.layers.clear();
+        return set_error(error, "hypura.turboquant.rotation_block_size must equal 8");
+    }
+    if (orthogonality_error < 0.0f || determinant_error_max < 0.0f) {
+        metadata.present = false;
+        metadata.layers.clear();
+        return set_error(error, "hypura.turboquant orthogonality/determinant metrics must be non-negative");
+    }
+    if (!view_bundle_complete) {
+        metadata.present = false;
+        metadata.layers.clear();
+        return set_error(error, "hypura.turboquant.view_bundle_complete must be true");
+    }
+
+    runtime_mode = canonical_runtime_mode(runtime_mode);
+    public_triality_view = canonical_triality_view(public_triality_view);
+    if (runtime_mode != TRIALITY_RUNTIME_MODE) {
+        metadata.present = false;
+        metadata.layers.clear();
+        return set_error(error, "unsupported hypura.turboquant.runtime_mode");
+    }
+    if (public_triality_view != "vector") {
+        metadata.present = false;
+        metadata.layers.clear();
+        return set_error(error, "only vector triality view is accepted for the production shared ABI");
+    }
+
     return true;
 }
 
@@ -496,8 +634,8 @@ bool llama_turboquant_validate_so8_rotation(
     const std::vector<float> & rotation_matrix,
     float atol,
     std::string * error) {
-    if (rotation_matrix.size() != 64) {
-        return set_error(error, "SO(8) rotation must contain exactly 64 coefficients");
+    if (rotation_matrix.size() != 64 || rotation_matrix.size() % 64 != 0) {
+        return set_error(error, "SO(8) rotation must contain exactly one 8x8 block (64 coefficients)");
     }
     if (!(atol > 0.0f)) {
         return set_error(error, "SO(8) validation tolerance must be positive");
@@ -542,6 +680,45 @@ bool llama_turboquant_validate_so8_rotation(
                 return set_error(error, "SO(8) rotation row orthogonality check failed");
             }
         }
+    }
+
+    double det_matrix[8][8];
+    for (uint32_t row = 0; row < 8; ++row) {
+        for (uint32_t col = 0; col < 8; ++col) {
+            det_matrix[row][col] = static_cast<double>(rotation_matrix[row * 8 + col]);
+        }
+    }
+    double det = 1.0;
+    for (uint32_t pivot = 0; pivot < 8; ++pivot) {
+        uint32_t best_row = pivot;
+        double best_value = std::fabs(det_matrix[pivot][pivot]);
+        for (uint32_t row = pivot + 1; row < 8; ++row) {
+            const double candidate = std::fabs(det_matrix[row][pivot]);
+            if (candidate > best_value) {
+                best_value = candidate;
+                best_row = row;
+            }
+        }
+        if (best_value <= atol) {
+            return set_error(error, "SO(8) rotation determinant check failed");
+        }
+        if (best_row != pivot) {
+            for (uint32_t col = 0; col < 8; ++col) {
+                std::swap(det_matrix[pivot][col], det_matrix[best_row][col]);
+            }
+            det = -det;
+        }
+        const double pivot_value = det_matrix[pivot][pivot];
+        det *= pivot_value;
+        for (uint32_t row = pivot + 1; row < 8; ++row) {
+            const double factor = det_matrix[row][pivot] / pivot_value;
+            for (uint32_t col = pivot; col < 8; ++col) {
+                det_matrix[row][col] -= factor * det_matrix[pivot][col];
+            }
+        }
+    }
+    if (!std::isfinite(det) || std::fabs(det - 1.0) > atol) {
+        return set_error(error, "SO(8) rotation determinant check failed");
     }
 
     return true;
