@@ -103,6 +103,11 @@ bool llama_turboquant_load_gguf_metadata(
     llama_turboquant_gguf_metadata & metadata,
     std::string * error);
 
+bool llama_turboquant_validate_so8_rotation(
+    const std::vector<float> & rotation_matrix,
+    float atol,
+    std::string * error);
+
 // Applies an in-place block-SO(8) rotation for vectors laid out as [n_vec, head_dim].
 // If head_dim is not a multiple of 8, this function leaves the tail unchanged.
 void llama_turboquant_apply_so8_rotation(
@@ -122,6 +127,23 @@ llama_turboquant_triality_metrics llama_turboquant_evaluate_triality(
     uint32_t n_vec,
     uint32_t head_dim,
     const std::vector<float> & codebook);
+
+// Research-faithful reference codec for TQ4_1S weights.
+std::vector<uint8_t> llama_turboquant_quantize_tq4_1s_reference(
+    const std::vector<float> & values,
+    std::string * error);
+
+std::vector<float> llama_turboquant_dequantize_tq4_1s_reference(
+    const std::vector<uint8_t> & packed_values,
+    std::string * error);
+
+// Native reference matvec: activation is pre-rotated once, weights remain packed.
+std::vector<float> llama_turboquant_mul_mat_tq4_1s_reference(
+    const std::vector<uint8_t> & packed_weights,
+    uint32_t n_rows,
+    uint32_t n_cols,
+    const std::vector<float> & activation,
+    std::string * error);
 
 bool llama_turboquant_save_artifact(
     const std::string & path,
