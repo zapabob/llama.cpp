@@ -257,6 +257,7 @@ if (NOT GGML_BACKEND_DL)
     llama_build_and_test(test-rope.cpp)
     llama_build_and_test(test-turboquant-artifact.cpp)
     llama_build_and_test(test-turboquant-gguf-metadata.cpp)
+    llama_build_and_test(test-turboquant-runtime-reference.cpp)
 endif()
 
 # libmtmd
