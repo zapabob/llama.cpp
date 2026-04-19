@@ -88,6 +88,7 @@ typedef sycl::half2 ggml_half2;
 
 #define QK_K 256
 #define K_SCALE_SIZE 12
+#define QK_TQ4_1S 32
 
 #if defined(GGML_COMMON_DECL_CUDA) || defined(GGML_COMMON_DECL_HIP) || defined(GGML_COMMON_DECL_SYCL)
 // QR = QK / number of values before dequantization
@@ -276,6 +277,14 @@ typedef struct {
     ggml_half d;
 } block_tq2_0;
 static_assert(sizeof(block_tq2_0) == sizeof(ggml_half) + QK_K / 4, "wrong tq2_0 block size/padding");
+
+// 32-value TurboQuant weight block with separate fp16 scales for each half.
+typedef struct {
+    ggml_half d0;
+    ggml_half d1;
+    uint8_t qs[QK_TQ4_1S/2];
+} block_tq4_1s;
+static_assert(sizeof(block_tq4_1s) == 2*sizeof(ggml_half) + QK_TQ4_1S/2, "wrong tq4_1s block size/padding");
 
 //
 // Super-block quantization structures

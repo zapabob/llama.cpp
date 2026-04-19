@@ -255,9 +255,15 @@ if (NOT GGML_BACKEND_DL)
     llama_build_and_test(test-quantize-fns.cpp)
     llama_build_and_test(test-quantize-perf.cpp)
     llama_build_and_test(test-rope.cpp)
-    llama_build_and_test(test-turboquant-artifact.cpp)
-    llama_build_and_test(test-turboquant-gguf-metadata.cpp)
-    llama_build_and_test(test-turboquant-runtime-reference.cpp)
+    if (NOT WIN32 OR NOT BUILD_SHARED_LIBS)
+        # These TurboQuant tests reach internal helpers that are not exported from
+        # shared llama.dll builds on Windows.
+        llama_build_and_test(test-turboquant-artifact.cpp)
+        llama_build_and_test(test-turboquant-gguf-metadata.cpp)
+        # This test reaches internal TurboQuant reference helpers that are not exported from
+        # shared llama.dll builds on Windows.
+        llama_build_and_test(test-turboquant-runtime-reference.cpp)
+    endif()
 endif()
 
 # libmtmd
