@@ -45,7 +45,7 @@ static void populate_complete_metadata(gguf_context * ctx, uint32_t n_layers = 2
     std::vector<std::string> rotation_policy(n_layers, "block_so8_learned");
     std::vector<uint32_t> rotation_seed(n_layers, 17);
     std::vector<uint32_t> qjl_seed(n_layers, 71);
-    std::vector<std::string> triality_mode(n_layers, "triality_proxy");
+    std::vector<std::string> triality_mode(n_layers, "research-kv-split");
     std::vector<std::string> triality_view(n_layers, "vector");
     std::vector<std::string> allocation_scheme(n_layers, "magnitude-topk");
     std::vector<std::string> bitwidth_payload_dtype(n_layers, "uint8");
@@ -71,6 +71,13 @@ static void populate_complete_metadata(gguf_context * ctx, uint32_t n_layers = 2
 }
 
 static void populate_public_weight_metadata(gguf_context * ctx) {
+    gguf_set_val_str(ctx, "hypura.turboquant.codec", "tq4_1s");
+    gguf_set_val_u32(ctx, "hypura.turboquant.rotation_block_size", 8);
+    gguf_set_val_f32(ctx, "hypura.turboquant.orthogonality_error", 0.0f);
+    gguf_set_val_f32(ctx, "hypura.turboquant.determinant_error_max", 0.0f);
+    gguf_set_val_bool(ctx, "hypura.turboquant.view_bundle_complete", true);
+    gguf_set_val_str(ctx, "hypura.turboquant.runtime_mode", "research-kv-split");
+    gguf_set_val_str(ctx, "hypura.turboquant.triality_view", "vector");
     gguf_set_val_bool(ctx, "hypura.turboquant.weight.enabled", true);
     gguf_set_val_str(ctx, "hypura.turboquant.weight.source_ftype", "q8_0");
     gguf_set_val_str(ctx, "hypura.turboquant.weight.policy", "qwen35-full-attention-ffn");
@@ -111,7 +118,7 @@ int main() {
         t.assert_equal("schema version", uint32_t(1), metadata.schema_version);
         t.assert_equal("layer count", size_t(2), metadata.layers.size());
         t.assert_true("runtime bits preserved", std::fabs(metadata.layers[0].runtime_bits_per_channel - 3.25f) < 1e-6f);
-        t.assert_equal("triality mode", std::string("triality_proxy"), metadata.layers[1].triality_mode);
+        t.assert_equal("triality mode", std::string("key_only_block_so8_triality_vector"), metadata.layers[1].triality_mode);
         t.assert_equal("triality view", std::string("vector"), metadata.layers[1].triality_view);
         t.assert_true("weight metadata enabled", metadata.weight.enabled);
         t.assert_equal("weight source ftype", std::string("q8_0"), metadata.weight.source_ftype);
@@ -124,6 +131,7 @@ int main() {
     t.test("llama_turboquant_load_gguf_metadata_rejects_missing_required_key", [](testing & t) {
         auto ctx = make_ctx();
         populate_complete_metadata(ctx.get(), 2, false);
+        populate_public_weight_metadata(ctx.get());
 
         llama_turboquant_gguf_metadata metadata;
         std::string error;
@@ -134,6 +142,7 @@ int main() {
     t.test("llama_turboquant_load_gguf_metadata_rejects_layer_length_mismatch", [](testing & t) {
         auto ctx = make_ctx();
         populate_complete_metadata(ctx.get(), 2);
+        populate_public_weight_metadata(ctx.get());
         set_u32_array(ctx.get(), "tq_qjl_bits", std::vector<uint32_t>{1});
 
         llama_turboquant_gguf_metadata metadata;
@@ -145,6 +154,7 @@ int main() {
     t.test("llama_turboquant_load_gguf_metadata_rejects_inconsistent_runtime_bits", [](testing & t) {
         auto ctx = make_ctx();
         populate_complete_metadata(ctx.get(), 2);
+        populate_public_weight_metadata(ctx.get());
         set_f32_array(ctx.get(), "tq_runtime_bits_per_channel", std::vector<float>{3.0f, 3.25f});
 
         llama_turboquant_gguf_metadata metadata;
@@ -152,6 +162,20 @@ int main() {
         t.assert_true("parse fails", !llama_turboquant_load_gguf_metadata(ctx.get(), 2, metadata, &error));
         t.assert_true("mentions layer", error.find("layer 0") != std::string::npos);
         t.assert_true("mentions runtime bits", error.find("tq_runtime_bits_per_channel") != std::string::npos);
+    });
+
+    t.test("llama_turboquant_load_gguf_metadata_rejects_incomplete_shared_abi_metadata", [](testing & t) {
+        auto ctx = make_ctx();
+        populate_complete_metadata(ctx.get(), 2);
+        gguf_set_val_str(ctx.get(), "hypura.turboquant.codec", "tq4_1s");
+        gguf_set_val_u32(ctx.get(), "hypura.turboquant.rotation_block_size", 8);
+        gguf_set_val_f32(ctx.get(), "hypura.turboquant.orthogonality_error", 0.0f);
+        gguf_set_val_f32(ctx.get(), "hypura.turboquant.determinant_error_max", 0.0f);
+
+        llama_turboquant_gguf_metadata metadata;
+        std::string error;
+        t.assert_true("parse fails", !llama_turboquant_load_gguf_metadata(ctx.get(), 2, metadata, &error));
+        t.assert_true("mentions shared abi metadata", error.find("shared ABI metadata") != std::string::npos);
     });
 
     return t.summary();

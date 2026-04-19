@@ -112,6 +112,12 @@ void quantize_row_tq2_0(const float * GGML_RESTRICT x, void * GGML_RESTRICT vy, 
     quantize_row_tq2_0_ref(x, y, k);
 }
 
+void quantize_row_tq4_1s(const float * GGML_RESTRICT x, void * GGML_RESTRICT vy, int64_t k) {
+    assert(k % QK_TQ4_1S == 0);
+    block_tq4_1s * GGML_RESTRICT y = vy;
+    quantize_row_tq4_1s_ref(x, y, k);
+}
+
 //===================================== Q8_K ==============================================
 
 void quantize_row_q8_K_generic(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
@@ -503,6 +509,38 @@ void ggml_vec_dot_tq2_0_q8_K_generic(int n, float * GGML_RESTRICT s, size_t bs, 
     }
 
     *s = sumf;
+}
+
+void ggml_vec_dot_tq4_1s_q8_0_generic(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    assert(n % QK_TQ4_1S == 0);
+    assert(nrc == 1);
+    UNUSED(nrc);
+    UNUSED(bx);
+    UNUSED(by);
+    UNUSED(bs);
+
+    const block_tq4_1s * GGML_RESTRICT x = vx;
+    const block_q8_0   * GGML_RESTRICT y = vy;
+    const int nb = n / QK_TQ4_1S;
+
+    float sumf = 0.0f;
+    for (int i = 0; i < nb; ++i) {
+        float weights[QK_TQ4_1S];
+        dequantize_row_tq4_1s(x + i, weights, QK_TQ4_1S);
+
+        const float dy = ggml_fp16_to_fp32(y[i].d);
+        float block_sum = 0.0f;
+        for (int j = 0; j < QK_TQ4_1S; ++j) {
+            block_sum += weights[j] * (dy * y[i].qs[j]);
+        }
+        sumf += block_sum;
+    }
+
+    *s = sumf;
+}
+
+void ggml_vec_dot_tq4_1s_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    ggml_vec_dot_tq4_1s_q8_0_generic(n, s, bs, vx, bx, vy, by, nrc);
 }
 
 void ggml_vec_dot_q2_K_q8_K_generic(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {

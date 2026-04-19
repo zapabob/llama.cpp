@@ -6,12 +6,18 @@
 
 struct gguf_context;
 
+// Compatibility note: legacy bridge surfaces still accept zapabob/TheTom-style
+// aliases such as asym_q8_turbo4 even though the current production K-side
+// canonical mode is key_only_block_so8_triality_vector.
+
 struct llama_turboquant_runtime_config {
     bool enabled = false;
-    std::string mode = "asym_q8_turbo4";
+    std::string mode = "key_only_block_so8_triality_vector";
+    std::string triality_view = "vector";
     bool so8_enabled = true;
     bool so8_learned = false;
     bool triality_enabled = true;
+    bool require_artifact = false;
     float triality_mix = 0.5f;
     uint32_t rotation_seed = 0;
 };
