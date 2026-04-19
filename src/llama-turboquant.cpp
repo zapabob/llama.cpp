@@ -233,6 +233,51 @@ bool read_required_str_array(
     }
     return true;
 }
+
+bool read_optional_bool(
+    const gguf_context * ctx,
+    const char * key,
+    bool & out) {
+    const int64_t key_id = gguf_find_key(ctx, key);
+    if (key_id < 0) {
+        return false;
+    }
+    if (gguf_get_kv_type(ctx, key_id) != GGUF_TYPE_BOOL) {
+        return false;
+    }
+    out = gguf_get_val_bool(ctx, key_id);
+    return true;
+}
+
+bool read_optional_u64(
+    const gguf_context * ctx,
+    const char * key,
+    uint64_t & out) {
+    const int64_t key_id = gguf_find_key(ctx, key);
+    if (key_id < 0) {
+        return false;
+    }
+    if (gguf_get_kv_type(ctx, key_id) != GGUF_TYPE_UINT64) {
+        return false;
+    }
+    out = gguf_get_val_u64(ctx, key_id);
+    return true;
+}
+
+bool read_optional_string(
+    const gguf_context * ctx,
+    const char * key,
+    std::string & out) {
+    const int64_t key_id = gguf_find_key(ctx, key);
+    if (key_id < 0) {
+        return false;
+    }
+    if (gguf_get_kv_type(ctx, key_id) != GGUF_TYPE_STRING) {
+        return false;
+    }
+    out = gguf_get_val_str(ctx, key_id);
+    return true;
+}
 } // namespace
 
 llama_turboquant_runtime_config llama_turboquant_runtime_from_env() {
@@ -339,6 +384,16 @@ bool llama_turboquant_load_gguf_metadata(
             return false;
         }
     }
+
+    read_optional_bool(ctx, "hypura.turboquant.weight.enabled", metadata.weight.enabled);
+    read_optional_string(ctx, "hypura.turboquant.weight.source_ftype", metadata.weight.source_ftype);
+    read_optional_string(ctx, "hypura.turboquant.weight.policy", metadata.weight.policy);
+    read_optional_string(ctx, "hypura.turboquant.weight.protected_roles", metadata.weight.protected_roles);
+    read_optional_string(ctx, "hypura.turboquant.weight.protected_layers", metadata.weight.protected_layers);
+    read_optional_string(ctx, "hypura.turboquant.weight.modality_scope", metadata.weight.modality_scope);
+    read_optional_string(ctx, "hypura.turboquant.weight.payload_format", metadata.weight.payload_format);
+    read_optional_u64(ctx, "hypura.turboquant.weight.payload_bytes", metadata.weight.payload_bytes);
+    read_optional_string(ctx, "hypura.turboquant.weight.payload_json", metadata.weight.payload_json);
 
     return true;
 }
