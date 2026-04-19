@@ -1,4 +1,5 @@
 #include "llama-turboquant.h"
+#include "ggml.h"
 #include "gguf.h"
 
 #include <algorithm>
@@ -47,6 +48,99 @@ std::string env_string(const char * name, const char * fallback) {
 
 float sqr(float x) {
     return x * x;
+}
+
+constexpr uint32_t TQ4_1S_BLOCK_SIZE = 32;
+constexpr uint32_t TQ4_1S_BLOCK_BYTES = 20;
+constexpr uint32_t TQ4_1S_HALF_BLOCK = 16;
+constexpr float TQ4_1S_INV_SQRT32 = 0.17677669529663688f;
+constexpr uint32_t TRIALITY_CODEBOOK_SIZE = 3;
+
+constexpr float kTq4CentroidsWeight[16] = {
+    -2.732590f, -2.069017f, -1.618046f, -1.256231f,
+    -0.942340f, -0.656759f, -0.388048f, -0.128395f,
+     0.128395f,  0.388048f,  0.656759f,  0.942340f,
+     1.256231f,  1.618046f,  2.069017f,  2.732590f,
+};
+
+constexpr float kTq4MidpointsWeight[15] = {
+    -2.400804f, -1.843532f, -1.437139f, -1.099286f, -0.799550f,
+    -0.522404f, -0.258222f,  0.000000f,  0.258222f,  0.522404f,
+     0.799550f,  1.099286f,  1.437139f,  1.843532f,  2.400804f,
+};
+
+constexpr float kTqWeightSigns[32] = {
+    +1.0f, -1.0f, +1.0f, -1.0f, +1.0f, +1.0f, -1.0f, +1.0f,
+    -1.0f, -1.0f, +1.0f, -1.0f, +1.0f, +1.0f, -1.0f, +1.0f,
+    -1.0f, -1.0f, +1.0f, -1.0f, +1.0f, -1.0f, -1.0f, +1.0f,
+    -1.0f, +1.0f, +1.0f, -1.0f, +1.0f, -1.0f, -1.0f, +1.0f,
+};
+
+bool set_error(std::string * error, const std::string & message);
+
+bool validate_tq4_reference_shape(
+    const size_t value_count,
+    const std::string & label,
+    std::string * error) {
+    if (value_count == 0 || value_count % TQ4_1S_BLOCK_SIZE != 0) {
+        return set_error(
+            error,
+            label + " size must be a non-zero multiple of 32 values");
+    }
+    return true;
+}
+
+void fwht32(float * values) {
+    for (uint32_t step = 1; step < TQ4_1S_BLOCK_SIZE; step <<= 1) {
+        for (uint32_t base = 0; base < TQ4_1S_BLOCK_SIZE; base += step << 1) {
+            for (uint32_t j = base; j < base + step; ++j) {
+                const float a = values[j];
+                const float b = values[j + step];
+                values[j] = a + b;
+                values[j + step] = a - b;
+            }
+        }
+    }
+}
+
+void tq4_rht_forward(float * values) {
+    for (uint32_t i = 0; i < TQ4_1S_BLOCK_SIZE; ++i) {
+        values[i] *= kTqWeightSigns[i];
+    }
+    fwht32(values);
+    for (uint32_t i = 0; i < TQ4_1S_BLOCK_SIZE; ++i) {
+        values[i] *= TQ4_1S_INV_SQRT32;
+    }
+}
+
+void tq4_rht_inverse(float * values) {
+    fwht32(values);
+    for (uint32_t i = 0; i < TQ4_1S_BLOCK_SIZE; ++i) {
+        values[i] *= TQ4_1S_INV_SQRT32 * kTqWeightSigns[i];
+    }
+}
+
+uint8_t tq4_choose_index(const float value) {
+    for (uint8_t i = 0; i < 15; ++i) {
+        if (value < kTq4MidpointsWeight[i]) {
+            return i;
+        }
+    }
+    return 15;
+}
+
+float squared_l2_distance(
+    const std::vector<float> & lhs,
+    size_t lhs_offset,
+    const std::vector<float> & rhs,
+    size_t rhs_offset,
+    const uint32_t width) {
+    double sum = 0.0;
+    for (uint32_t i = 0; i < width; ++i) {
+        const double diff = static_cast<double>(lhs[lhs_offset + i]) - rhs[rhs_offset + i];
+        sum += diff * diff;
+    }
+    return static_cast<float>(sum);
 }
 
 bool set_error(std::string * error, const std::string & message) {
@@ -283,7 +377,7 @@ bool read_optional_string(
 llama_turboquant_runtime_config llama_turboquant_runtime_from_env() {
     llama_turboquant_runtime_config cfg;
     cfg.enabled = env_flag("LLAMA_TURBOQUANT", false);
-    cfg.mode = env_string("LLAMA_TURBOQUANT_MODE", "asym_q8_turbo4");
+    cfg.mode = env_string("LLAMA_TURBOQUANT_MODE", "key_only_block_so8_triality_vector");
     cfg.so8_enabled = env_flag("LLAMA_TURBOQUANT_SO8", true);
     cfg.so8_learned = env_flag("LLAMA_TURBOQUANT_SO8_LEARNED", false);
     cfg.triality_enabled = env_flag("LLAMA_TURBOQUANT_TRIALITY", true);
@@ -296,7 +390,7 @@ bool llama_turboquant_runtime_allows_k(const llama_turboquant_runtime_config & c
     if (!cfg.enabled) {
         return false;
     }
-    return cfg.mode == "triality_vector";
+    return cfg.mode == "triality_vector" || cfg.mode == "key_only_block_so8_triality_vector";
 }
 
 bool llama_turboquant_runtime_allows_v(const llama_turboquant_runtime_config & cfg) {
@@ -398,6 +492,61 @@ bool llama_turboquant_load_gguf_metadata(
     return true;
 }
 
+bool llama_turboquant_validate_so8_rotation(
+    const std::vector<float> & rotation_matrix,
+    float atol,
+    std::string * error) {
+    if (rotation_matrix.size() != 64) {
+        return set_error(error, "SO(8) rotation must contain exactly 64 coefficients");
+    }
+    if (!(atol > 0.0f)) {
+        return set_error(error, "SO(8) validation tolerance must be positive");
+    }
+
+    for (size_t i = 0; i < rotation_matrix.size(); ++i) {
+        if (!std::isfinite(rotation_matrix[i])) {
+            return set_error(error, "SO(8) rotation contains non-finite coefficients");
+        }
+    }
+
+    for (uint32_t row = 0; row < 8; ++row) {
+        double norm = 0.0;
+        for (uint32_t col = 0; col < 8; ++col) {
+            const double value = rotation_matrix[row * 8 + col];
+            norm += value * value;
+        }
+        if (std::fabs(norm - 1.0) > atol) {
+            return set_error(error, "SO(8) rotation row norm check failed");
+        }
+    }
+
+    for (uint32_t col = 0; col < 8; ++col) {
+        double norm = 0.0;
+        for (uint32_t row = 0; row < 8; ++row) {
+            const double value = rotation_matrix[row * 8 + col];
+            norm += value * value;
+        }
+        if (std::fabs(norm - 1.0) > atol) {
+            return set_error(error, "SO(8) rotation column norm check failed");
+        }
+    }
+
+    for (uint32_t lhs = 0; lhs < 8; ++lhs) {
+        for (uint32_t rhs = lhs + 1; rhs < 8; ++rhs) {
+            double dot = 0.0;
+            for (uint32_t col = 0; col < 8; ++col) {
+                dot += static_cast<double>(rotation_matrix[lhs * 8 + col]) *
+                       static_cast<double>(rotation_matrix[rhs * 8 + col]);
+            }
+            if (std::fabs(dot) > atol) {
+                return set_error(error, "SO(8) rotation row orthogonality check failed");
+            }
+        }
+    }
+
+    return true;
+}
+
 void llama_turboquant_apply_so8_rotation(
     std::vector<float> & values,
     uint32_t n_vec,
@@ -439,15 +588,56 @@ std::vector<float> llama_turboquant_train_triality_codebook(
         return {};
     }
 
-    const uint32_t n_centroids = 3;
+    const uint32_t n_centroids = TRIALITY_CODEBOOK_SIZE;
     std::vector<float> codebook(static_cast<size_t>(n_centroids) * head_dim, 0.0f);
-    const uint32_t stride = std::max(1u, n_vec / n_centroids);
     for (uint32_t c = 0; c < n_centroids; ++c) {
-        const uint32_t src = std::min(n_vec - 1, c * stride);
+        const uint32_t src = n_centroids > 1
+            ? static_cast<uint32_t>((static_cast<uint64_t>(c) * (n_vec - 1)) / (n_centroids - 1))
+            : 0;
         const size_t src_off = static_cast<size_t>(src) * head_dim;
         const size_t dst_off = static_cast<size_t>(c) * head_dim;
         std::copy_n(values.begin() + static_cast<std::ptrdiff_t>(src_off), head_dim, codebook.begin() + static_cast<std::ptrdiff_t>(dst_off));
     }
+
+    std::vector<uint32_t> assign(n_vec, 0);
+    std::vector<float> next(codebook.size(), 0.0f);
+    std::vector<uint32_t> counts(n_centroids, 0);
+
+    for (uint32_t iter = 0; iter < 12; ++iter) {
+        std::fill(next.begin(), next.end(), 0.0f);
+        std::fill(counts.begin(), counts.end(), 0);
+
+        for (uint32_t i = 0; i < n_vec; ++i) {
+            const size_t off = static_cast<size_t>(i) * head_dim;
+            float best_dist = std::numeric_limits<float>::max();
+            uint32_t best_idx = 0;
+            for (uint32_t c = 0; c < n_centroids; ++c) {
+                const float dist = squared_l2_distance(values, off, codebook, static_cast<size_t>(c) * head_dim, head_dim);
+                if (dist < best_dist) {
+                    best_dist = dist;
+                    best_idx = c;
+                }
+            }
+            assign[i] = best_idx;
+            counts[best_idx] += 1;
+            const size_t dst_off = static_cast<size_t>(best_idx) * head_dim;
+            for (uint32_t j = 0; j < head_dim; ++j) {
+                next[dst_off + j] += values[off + j];
+            }
+        }
+
+        for (uint32_t c = 0; c < n_centroids; ++c) {
+            const size_t dst_off = static_cast<size_t>(c) * head_dim;
+            if (counts[c] == 0) {
+                continue;
+            }
+            const float inv_count = 1.0f / static_cast<float>(counts[c]);
+            for (uint32_t j = 0; j < head_dim; ++j) {
+                codebook[dst_off + j] = next[dst_off + j] * inv_count;
+            }
+        }
+    }
+
     return codebook;
 }
 
@@ -457,30 +647,222 @@ llama_turboquant_triality_metrics llama_turboquant_evaluate_triality(
     uint32_t head_dim,
     const std::vector<float> & codebook) {
     llama_turboquant_triality_metrics m;
-    if (n_vec == 0 || head_dim == 0 || codebook.size() < static_cast<size_t>(3) * head_dim) {
+    if (n_vec == 0 || head_dim == 0 || codebook.size() < static_cast<size_t>(TRIALITY_CODEBOOK_SIZE) * head_dim) {
         return m;
     }
 
-    double mse_exact = 0.0;
+    double signal_power = 0.0;
     double mse_triality = 0.0;
     for (uint32_t i = 0; i < n_vec; ++i) {
         const size_t off = static_cast<size_t>(i) * head_dim;
+        float best_dist = std::numeric_limits<float>::max();
         for (uint32_t j = 0; j < head_dim; ++j) {
-            const float v = values[off + j];
-            mse_exact += sqr(v);
-            float best = std::numeric_limits<float>::max();
-            for (uint32_t c = 0; c < 3; ++c) {
-                const float d = std::fabs(v - codebook[static_cast<size_t>(c) * head_dim + j]);
-                best = std::min(best, d);
-            }
-            mse_triality += sqr(best);
+            signal_power += sqr(values[off + j]);
         }
+        for (uint32_t c = 0; c < TRIALITY_CODEBOOK_SIZE; ++c) {
+            const float dist = squared_l2_distance(values, off, codebook, static_cast<size_t>(c) * head_dim, head_dim);
+            best_dist = std::min(best_dist, dist);
+        }
+        mse_triality += best_dist;
     }
     const double denom = static_cast<double>(n_vec) * head_dim;
-    m.exact_mse = static_cast<float>(mse_exact / denom);
+    m.exact_mse = static_cast<float>(signal_power / denom);
     m.triality_mse = static_cast<float>(mse_triality / denom);
     m.relative_mse_reduction = m.exact_mse > 0.0f ? (m.exact_mse - m.triality_mse) / m.exact_mse : 0.0f;
     return m;
+}
+
+std::vector<uint8_t> llama_turboquant_quantize_tq4_1s_reference(
+    const std::vector<float> & values,
+    std::string * error) {
+    if (!validate_tq4_reference_shape(values.size(), "TQ4_1S input", error)) {
+        return {};
+    }
+
+    const size_t n_blocks = values.size() / TQ4_1S_BLOCK_SIZE;
+    std::vector<uint8_t> packed(n_blocks * TQ4_1S_BLOCK_BYTES, 0);
+
+    static const float scale_candidates[9] = {0.6f, 0.7f, 0.8f, 0.9f, 1.0f, 1.1f, 1.2f, 1.35f, 1.5f};
+
+    for (size_t block = 0; block < n_blocks; ++block) {
+        float buf[TQ4_1S_BLOCK_SIZE];
+        const size_t block_offset = block * TQ4_1S_BLOCK_SIZE;
+        for (uint32_t i = 0; i < TQ4_1S_BLOCK_SIZE; ++i) {
+            buf[i] = values[block_offset + i];
+        }
+        tq4_rht_forward(buf);
+
+        float rms0 = 0.0f;
+        float rms1 = 0.0f;
+        for (uint32_t i = 0; i < TQ4_1S_HALF_BLOCK; ++i) {
+            rms0 += buf[i] * buf[i];
+            rms1 += buf[i + TQ4_1S_HALF_BLOCK] * buf[i + TQ4_1S_HALF_BLOCK];
+        }
+        rms0 = std::sqrt(rms0 / static_cast<float>(TQ4_1S_HALF_BLOCK));
+        rms1 = std::sqrt(rms1 / static_cast<float>(TQ4_1S_HALF_BLOCK));
+
+        float best_d0 = rms0;
+        float best_d1 = rms1;
+        float best_err = std::numeric_limits<float>::max();
+
+        for (float candidate : scale_candidates) {
+            const float d0 = rms0 * candidate;
+            const float d1 = rms1 * candidate;
+            const float inv0 = d0 > TURBOQUANT_FLOAT_EPS ? 1.0f / d0 : 0.0f;
+            const float inv1 = d1 > TURBOQUANT_FLOAT_EPS ? 1.0f / d1 : 0.0f;
+            float err = 0.0f;
+            for (uint32_t i = 0; i < TQ4_1S_HALF_BLOCK; ++i) {
+                const uint8_t idx0 = tq4_choose_index(buf[i] * inv0);
+                const uint8_t idx1 = tq4_choose_index(buf[i + TQ4_1S_HALF_BLOCK] * inv1);
+                err += sqr(buf[i] - kTq4CentroidsWeight[idx0] * d0);
+                err += sqr(buf[i + TQ4_1S_HALF_BLOCK] - kTq4CentroidsWeight[idx1] * d1);
+            }
+            if (err < best_err) {
+                best_err = err;
+                best_d0 = d0;
+                best_d1 = d1;
+            }
+        }
+
+        for (uint32_t iter = 0; iter < 6; ++iter) {
+            const float inv0 = best_d0 > TURBOQUANT_FLOAT_EPS ? 1.0f / best_d0 : 0.0f;
+            const float inv1 = best_d1 > TURBOQUANT_FLOAT_EPS ? 1.0f / best_d1 : 0.0f;
+            float num0 = 0.0f;
+            float den0 = 0.0f;
+            float num1 = 0.0f;
+            float den1 = 0.0f;
+            for (uint32_t i = 0; i < TQ4_1S_HALF_BLOCK; ++i) {
+                const uint8_t idx0 = tq4_choose_index(buf[i] * inv0);
+                const uint8_t idx1 = tq4_choose_index(buf[i + TQ4_1S_HALF_BLOCK] * inv1);
+                const float c0 = kTq4CentroidsWeight[idx0];
+                const float c1 = kTq4CentroidsWeight[idx1];
+                num0 += buf[i] * c0;
+                den0 += c0 * c0;
+                num1 += buf[i + TQ4_1S_HALF_BLOCK] * c1;
+                den1 += c1 * c1;
+            }
+            if (den0 > TURBOQUANT_FLOAT_EPS) {
+                best_d0 = num0 / den0;
+            }
+            if (den1 > TURBOQUANT_FLOAT_EPS) {
+                best_d1 = num1 / den1;
+            }
+        }
+
+        const size_t byte_offset = block * TQ4_1S_BLOCK_BYTES;
+        const ggml_fp16_t d0 = ggml_fp32_to_fp16(best_d0);
+        const ggml_fp16_t d1 = ggml_fp32_to_fp16(best_d1);
+        packed[byte_offset + 0] = static_cast<uint8_t>(d0 & 0xff);
+        packed[byte_offset + 1] = static_cast<uint8_t>((d0 >> 8) & 0xff);
+        packed[byte_offset + 2] = static_cast<uint8_t>(d1 & 0xff);
+        packed[byte_offset + 3] = static_cast<uint8_t>((d1 >> 8) & 0xff);
+
+        const float inv0 = best_d0 > TURBOQUANT_FLOAT_EPS ? 1.0f / best_d0 : 0.0f;
+        const float inv1 = best_d1 > TURBOQUANT_FLOAT_EPS ? 1.0f / best_d1 : 0.0f;
+        for (uint32_t i = 0; i < TQ4_1S_BLOCK_SIZE; ++i) {
+            const float inv = i < TQ4_1S_HALF_BLOCK ? inv0 : inv1;
+            const uint8_t idx = tq4_choose_index(buf[i] * inv);
+            packed[byte_offset + 4 + (i / 2)] |= static_cast<uint8_t>((idx & 0x0F) << ((i & 1) * 4));
+        }
+    }
+
+    return packed;
+}
+
+std::vector<float> llama_turboquant_dequantize_tq4_1s_reference(
+    const std::vector<uint8_t> & packed_values,
+    std::string * error) {
+    if (packed_values.empty() || packed_values.size() % TQ4_1S_BLOCK_BYTES != 0) {
+        set_error(error, "TQ4_1S packed buffer must be a non-zero multiple of 20 bytes");
+        return {};
+    }
+
+    const size_t n_blocks = packed_values.size() / TQ4_1S_BLOCK_BYTES;
+    std::vector<float> values(n_blocks * TQ4_1S_BLOCK_SIZE, 0.0f);
+
+    for (size_t block = 0; block < n_blocks; ++block) {
+        const size_t byte_offset = block * TQ4_1S_BLOCK_BYTES;
+        const ggml_fp16_t d0_bits = static_cast<ggml_fp16_t>(
+            static_cast<uint16_t>(packed_values[byte_offset + 0]) |
+            (static_cast<uint16_t>(packed_values[byte_offset + 1]) << 8));
+        const ggml_fp16_t d1_bits = static_cast<ggml_fp16_t>(
+            static_cast<uint16_t>(packed_values[byte_offset + 2]) |
+            (static_cast<uint16_t>(packed_values[byte_offset + 3]) << 8));
+        const float d0 = ggml_fp16_to_fp32(d0_bits);
+        const float d1 = ggml_fp16_to_fp32(d1_bits);
+
+        float buf[TQ4_1S_BLOCK_SIZE];
+        for (uint32_t i = 0; i < TQ4_1S_BLOCK_SIZE; ++i) {
+            const uint8_t packed = packed_values[byte_offset + 4 + (i / 2)];
+            const uint8_t idx = static_cast<uint8_t>((packed >> ((i & 1) * 4)) & 0x0F);
+            const float d = i < TQ4_1S_HALF_BLOCK ? d0 : d1;
+            buf[i] = kTq4CentroidsWeight[idx] * d;
+        }
+        tq4_rht_inverse(buf);
+
+        const size_t value_offset = block * TQ4_1S_BLOCK_SIZE;
+        for (uint32_t i = 0; i < TQ4_1S_BLOCK_SIZE; ++i) {
+            values[value_offset + i] = buf[i];
+        }
+    }
+
+    return values;
+}
+
+std::vector<float> llama_turboquant_mul_mat_tq4_1s_reference(
+    const std::vector<uint8_t> & packed_weights,
+    uint32_t n_rows,
+    uint32_t n_cols,
+    const std::vector<float> & activation,
+    std::string * error) {
+    if (n_rows == 0 || n_cols == 0 || n_cols % TQ4_1S_BLOCK_SIZE != 0) {
+        set_error(error, "TQ4_1S matmul expects non-zero rows and cols divisible by 32");
+        return {};
+    }
+    if (activation.size() != static_cast<size_t>(n_cols)) {
+        set_error(error, "TQ4_1S matmul activation size must match n_cols");
+        return {};
+    }
+    const size_t expected_bytes = static_cast<size_t>(n_rows) * (static_cast<size_t>(n_cols) / TQ4_1S_BLOCK_SIZE) * TQ4_1S_BLOCK_BYTES;
+    if (packed_weights.size() != expected_bytes) {
+        set_error(error, "TQ4_1S matmul packed weight size does not match n_rows*n_cols");
+        return {};
+    }
+
+    std::vector<float> rotated = activation;
+    for (uint32_t block = 0; block < n_cols / TQ4_1S_BLOCK_SIZE; ++block) {
+        float * block_ptr = rotated.data() + static_cast<size_t>(block) * TQ4_1S_BLOCK_SIZE;
+        tq4_rht_forward(block_ptr);
+    }
+
+    std::vector<float> output(n_rows, 0.0f);
+    const size_t blocks_per_row = n_cols / TQ4_1S_BLOCK_SIZE;
+
+    for (uint32_t row = 0; row < n_rows; ++row) {
+        double sum = 0.0;
+        for (size_t block = 0; block < blocks_per_row; ++block) {
+            const size_t byte_offset = (static_cast<size_t>(row) * blocks_per_row + block) * TQ4_1S_BLOCK_BYTES;
+            const ggml_fp16_t d0_bits = static_cast<ggml_fp16_t>(
+                static_cast<uint16_t>(packed_weights[byte_offset + 0]) |
+                (static_cast<uint16_t>(packed_weights[byte_offset + 1]) << 8));
+            const ggml_fp16_t d1_bits = static_cast<ggml_fp16_t>(
+                static_cast<uint16_t>(packed_weights[byte_offset + 2]) |
+                (static_cast<uint16_t>(packed_weights[byte_offset + 3]) << 8));
+            const float d0 = ggml_fp16_to_fp32(d0_bits);
+            const float d1 = ggml_fp16_to_fp32(d1_bits);
+
+            const size_t act_offset = block * TQ4_1S_BLOCK_SIZE;
+            for (uint32_t i = 0; i < TQ4_1S_BLOCK_SIZE; ++i) {
+                const uint8_t packed = packed_weights[byte_offset + 4 + (i / 2)];
+                const uint8_t idx = static_cast<uint8_t>((packed >> ((i & 1) * 4)) & 0x0F);
+                const float d = i < TQ4_1S_HALF_BLOCK ? d0 : d1;
+                sum += static_cast<double>(kTq4CentroidsWeight[idx] * d) * rotated[act_offset + i];
+            }
+        }
+        output[row] = static_cast<float>(sum);
+    }
+
+    return output;
 }
 
 bool llama_turboquant_save_artifact(
@@ -578,6 +960,16 @@ bool llama_turboquant_load_artifact(
             *error = "artifact parse failed";
         }
         return false;
+    }
+    if (artifact.so8_learned) {
+        if (!llama_turboquant_validate_so8_rotation(artifact.so8_rotation, 1e-3f, error)) {
+            return false;
+        }
+    }
+    if (artifact.triality_enabled) {
+        if (artifact.head_dim == 0 || artifact.triality_codebook.size() != static_cast<size_t>(TRIALITY_CODEBOOK_SIZE) * artifact.head_dim) {
+            return set_error(error, "triality codebook size must equal 3 * head_dim");
+        }
     }
     return true;
 }

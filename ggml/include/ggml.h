@@ -423,7 +423,8 @@ extern "C" {
         // GGML_TYPE_Q4_0_8_8 = 33,
         GGML_TYPE_TQ1_0   = 34,
         GGML_TYPE_TQ2_0   = 35,
-        // GGML_TYPE_IQ4_NL_4_4 = 36,
+        // Reuse the removed legacy slot so existing TQ4_1S GGUF artifacts stay loadable.
+        GGML_TYPE_TQ4_1S  = 36,
         // GGML_TYPE_IQ4_NL_4_8 = 37,
         // GGML_TYPE_IQ4_NL_8_8 = 38,
         GGML_TYPE_MXFP4   = 39, // MXFP4 (1 block)
