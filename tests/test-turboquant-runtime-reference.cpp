@@ -67,6 +67,15 @@ int main() {
         t.assert_true("v-side remains disabled for key-only mode", !llama_turboquant_runtime_allows_v(cfg));
     });
 
+    t.test("llama_turboquant_runtime_accepts_compatibility_aliases", [](testing & t) {
+        llama_turboquant_runtime_config cfg;
+        cfg.enabled = true;
+        cfg.mode = "research-kv-split";
+        t.assert_true("research-kv-split alias is accepted", llama_turboquant_runtime_allows_k(cfg));
+        cfg.mode = "triality-vector";
+        t.assert_true("triality-vector alias is accepted", llama_turboquant_runtime_allows_k(cfg));
+    });
+
     t.test("llama_turboquant_tq4_1s_reference_roundtrip_is_stable", [](testing & t) {
         const std::vector<float> source = make_wave_values(64, 0.25f);
         std::string error;

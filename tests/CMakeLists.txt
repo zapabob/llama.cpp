@@ -263,6 +263,21 @@ if (NOT GGML_BACKEND_DL)
         # This test reaches internal TurboQuant reference helpers that are not exported from
         # shared llama.dll builds on Windows.
         llama_build_and_test(test-turboquant-runtime-reference.cpp)
+        if (GGML_CUDA)
+            enable_language(CUDA)
+            add_executable(test-turboquant-cuda-kernels test-turboquant-cuda-kernels.cu)
+            get_target_property(GGML_CUDA_TEST_ARCHS ggml-cuda CUDA_ARCHITECTURES)
+            set_property(TARGET test-turboquant-cuda-kernels PROPERTY CUDA_ARCHITECTURES "${GGML_CUDA_TEST_ARCHS}")
+            target_include_directories(test-turboquant-cuda-kernels PRIVATE
+                ${PROJECT_SOURCE_DIR}/ggml/src
+                ${PROJECT_SOURCE_DIR}/ggml/src/ggml-cuda
+            )
+            target_link_libraries(test-turboquant-cuda-kernels PRIVATE common ggml-cuda)
+            if (LLAMA_TESTS_INSTALL)
+                install(TARGETS test-turboquant-cuda-kernels RUNTIME)
+            endif()
+            llama_test(test-turboquant-cuda-kernels)
+        endif()
     endif()
 endif()
 

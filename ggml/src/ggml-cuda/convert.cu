@@ -1,4 +1,5 @@
 #include "convert.cuh"
+#include "cpy-utils.cuh"
 #include "dequantize.cuh"
 
 #include <cstdint>
@@ -149,6 +150,21 @@ static __global__ void dequantize_block_tq4_1s_contiguous(const block_tq4_1s * _
     for (int i = 0; i < QK_TQ4_1S; ++i) {
         block_out[i] = ggml_cuda_cast<dst_t>(values[i]);
     }
+}
+
+static __global__ void quantize_block_tq4_1s_q8_0_contiguous(
+    const block_tq4_1s * __restrict__ vx,
+    block_q8_0 * __restrict__ y,
+    int64_t nb) {
+    const int64_t ib = (int64_t) blockDim.x * blockIdx.x + threadIdx.x;
+
+    if (ib >= nb) {
+        return;
+    }
+
+    float values[QK_TQ4_1S];
+    dequantize_block_tq4_1s_cuda(vx[ib], values);
+    quantize_f32_q8_0_block(values, &y[ib]);
 }
 
 template<typename dst_t>
@@ -624,6 +640,14 @@ static void dequantize_row_tq4_1s_cuda(const void * vx, dst_t * y, const int64_t
         (const block_tq4_1s *) vx, y, nb);
 }
 
+static void quantize_row_tq4_1s_q8_0_cuda(const void * vx, block_q8_0 * y, const int64_t k, cudaStream_t stream) {
+    GGML_ASSERT(k % QK_TQ4_1S == 0);
+    const int64_t nb = k / QK_TQ4_1S;
+    const int num_blocks = (int) ((nb + CUDA_TQ4_1S_THREADS - 1) / CUDA_TQ4_1S_THREADS);
+    quantize_block_tq4_1s_q8_0_contiguous<<<num_blocks, CUDA_TQ4_1S_THREADS, 0, stream>>>(
+        (const block_tq4_1s *) vx, y, nb);
+}
+
 template<typename dst_t>
 static void dequantize_tq4_1s_cuda(const void * vx, dst_t * y,
         const int64_t ne00, const int64_t ne01, const int64_t ne02, const int64_t ne03,
@@ -950,6 +974,15 @@ to_fp32_cuda_t ggml_get_to_fp32_cuda(ggml_type type) {
             return convert_unary_cont_cuda<half>;
         case GGML_TYPE_BF16:
             return convert_unary_cont_cuda<nv_bfloat16>;
+        default:
+            return nullptr;
+    }
+}
+
+to_q8_0_cuda_t ggml_get_to_q8_0_cuda(ggml_type type) {
+    switch (type) {
+        case GGML_TYPE_TQ4_1S:
+            return quantize_row_tq4_1s_q8_0_cuda;
         default:
             return nullptr;
     }

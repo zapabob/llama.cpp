@@ -1505,12 +1505,30 @@ static void ggml_cuda_op_mul_mat_cublas(
     } else if (fast_fp16_hardware_available(cc) && use_fp16) {
         // convert src0 and src1 to fp16, multiply as fp16, convert dst to fp32
         ggml_cuda_pool_alloc<half> src0_as_f16(ctx.pool(id));
+        ggml_cuda_pool_alloc<block_q8_0> src0_as_q8_0(ctx.pool(id));
+        const bool use_tq4_1s_q8_0_scratch =
+            src0->type == GGML_TYPE_TQ4_1S &&
+            ggml_is_contiguous(src0) &&
+            row_diff == src0->ne[1] &&
+            src1_ncols >= 32;
         if (src0->type != GGML_TYPE_F16) {
-            const to_fp16_cuda_t to_fp16_cuda = ggml_get_to_fp16_cuda(src0->type);
-            GGML_ASSERT(to_fp16_cuda != nullptr);
             size_t ne = row_diff*ne00;
-            src0_as_f16.alloc(ne);
-            to_fp16_cuda(src0_dd_i, src0_as_f16.get(), ne, stream);
+            if (use_tq4_1s_q8_0_scratch) {
+                GGML_ASSERT(ne % QK8_0 == 0);
+                const to_q8_0_cuda_t to_q8_0_cuda = ggml_get_to_q8_0_cuda(src0->type);
+                const to_fp16_cuda_t q8_0_to_fp16_cuda = ggml_get_to_fp16_cuda(GGML_TYPE_Q8_0);
+                GGML_ASSERT(to_q8_0_cuda != nullptr);
+                GGML_ASSERT(q8_0_to_fp16_cuda != nullptr);
+                src0_as_q8_0.alloc(ne / QK8_0);
+                to_q8_0_cuda(src0_dd_i, src0_as_q8_0.get(), ne, stream);
+                src0_as_f16.alloc(ne);
+                q8_0_to_fp16_cuda(src0_as_q8_0.get(), src0_as_f16.get(), ne, stream);
+            } else {
+                const to_fp16_cuda_t to_fp16_cuda = ggml_get_to_fp16_cuda(src0->type);
+                GGML_ASSERT(to_fp16_cuda != nullptr);
+                src0_as_f16.alloc(ne);
+                to_fp16_cuda(src0_dd_i, src0_as_f16.get(), ne, stream);
+            }
         }
         const half * src0_ptr = src0->type == GGML_TYPE_F16 ? (const half *) src0_dd_i : src0_as_f16.get();
 
@@ -2411,6 +2429,12 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
     bool use_batched_cublas_f16  = src0->type == GGML_TYPE_F16 && (src1->type == GGML_TYPE_F16 || !any_gpus_with_slow_fp16);
     bool use_batched_cublas_bf16 = src0->type == GGML_TYPE_BF16 && bf16_mma_hardware_available(cc);
     bool use_batched_cublas_f32  = src0->type == GGML_TYPE_F32;
+    const bool prefer_tq4_1s_staged_cublas =
+        src0->type == GGML_TYPE_TQ4_1S &&
+        !split &&
+        !ggml_is_transposed(src0) &&
+        !ggml_is_transposed(src1) &&
+        src1->ne[1] >= 32;
 
     if (!split && use_mul_mat_vec_f) {
         // the custom F16 vector kernel can be used over batched cuBLAS GEMM
@@ -2426,6 +2450,10 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
         && !ggml_is_transposed(src0) && !ggml_is_transposed(src1) && src1->ne[2]*src1->ne[3] > 1) {
         // general KQ + KQV multi-batch without FlashAttention
         ggml_cuda_mul_mat_batched_cublas(ctx, src0, src1, dst);
+    } else if (prefer_tq4_1s_staged_cublas) {
+        // Phase A for TQ4_1S: use the staged converter path and existing cuBLAS GEMM
+        // for larger prefill-style batches until a fused packed-weight kernel is available.
+        ggml_cuda_op_mul_mat(ctx, src0, src1, dst, ggml_cuda_op_mul_mat_cublas, nullptr);
     } else if (use_mul_mat_vec_f) {
         ggml_cuda_op_mul_mat(ctx, src0, src1, dst, ggml_cuda_op_mul_mat_vec_f, nullptr);
     } else if (use_mul_mat_vec_q) {

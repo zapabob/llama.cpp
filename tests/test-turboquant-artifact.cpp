@@ -31,7 +31,7 @@ static llama_turboquant_artifact_metadata make_metadata() {
     meta.rotation_policy = "block_so8_learned";
     meta.rotation_seed = 17;
     meta.qjl_seed = 71;
-    meta.triality_mode = "triality_proxy";
+    meta.triality_mode = "research-kv-split";
     meta.triality_view = "vector";
     meta.stage1_allocation_scheme = "magnitude-topk";
     meta.stage1_bitwidth_payload_dtype = "uint8";
@@ -109,7 +109,10 @@ int main() {
         t.assert_equal("head_dim", artifact.head_dim, loaded.head_dim);
         t.assert_equal("schema_version", artifact.metadata.schema_version, loaded.metadata.schema_version);
         t.assert_true("runtime bits", std::fabs(loaded.metadata.runtime_bits_per_channel - 3.25f) < 1e-6f);
-        t.assert_equal("triality_mode", artifact.metadata.triality_mode, loaded.metadata.triality_mode);
+        t.assert_equal(
+            "triality_mode",
+            std::string("key_only_block_so8_triality_vector"),
+            loaded.metadata.triality_mode);
         t.assert_equal("triality_view", artifact.metadata.triality_view, loaded.metadata.triality_view);
         t.assert_equal("rotation_policy", artifact.metadata.rotation_policy, loaded.metadata.rotation_policy);
         std::filesystem::remove(path);
@@ -139,7 +142,7 @@ int main() {
                 "tq_rotation_policy=block_so8_learned",
                 "tq_rotation_seed=17",
                 "tq_qjl_seed=71",
-                "tq_triality_mode=triality_proxy",
+                "tq_triality_mode=research-kv-split",
                 "tq_triality_view=vector",
                 "tq_stage1_allocation_scheme=magnitude-topk",
                 "tq_stage1_bitwidth_payload_dtype=uint8",
@@ -150,6 +153,35 @@ int main() {
         std::string error;
         t.assert_true("load fails", !llama_turboquant_load_artifact(path.string(), loaded, &error));
         t.assert_true("mentions runtime bits", error.find("runtime_bits_per_channel") != std::string::npos);
+        std::filesystem::remove(path);
+    });
+
+    t.test("llama_turboquant_load_accepts_spinor_plus_artifact_metadata", [](testing & t) {
+        const auto path = make_temp_path("turboquant-plus-view");
+        write_artifact_file(
+            path,
+            {
+                "tq_schema_version=1",
+                "tq_total_bits=3.5",
+                "tq_runtime_bits_per_channel=3.25",
+                "tq_stage1_effective_bits=2.25",
+                "tq_qjl_bits=1",
+                "tq_qjl_dim=8",
+                "tq_rotation_policy=block_so8_learned",
+                "tq_rotation_seed=17",
+                "tq_qjl_seed=71",
+                "tq_triality_mode=triality-plus",
+                "tq_triality_view=plus",
+                "tq_stage1_allocation_scheme=magnitude-topk",
+                "tq_stage1_bitwidth_payload_dtype=uint8",
+                "tq_norm_dtype=float32",
+                "tq_sign_pack_format=int8_unpacked_binary",
+            });
+        llama_turboquant_artifact loaded;
+        std::string error;
+        t.assert_true("load succeeds", llama_turboquant_load_artifact(path.string(), loaded, &error));
+        t.assert_equal("triality mode", std::string("key_only_block_so8_triality_plus"), loaded.metadata.triality_mode);
+        t.assert_equal("triality view", std::string("spinor_plus_proxy"), loaded.metadata.triality_view);
         std::filesystem::remove(path);
     });
 
