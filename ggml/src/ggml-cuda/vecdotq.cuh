@@ -103,6 +103,86 @@ static __device__ __forceinline__ uint32_t unpack_ksigns(const uint8_t v) {
     return s * 0x01010101;
 }
 
+static __device__ __forceinline__ float tq4_1s_centroid_mmvq(const uint8_t idx) {
+    switch (idx & 0x0F) {
+        case 0x0: return -2.732590f;
+        case 0x1: return -2.069017f;
+        case 0x2: return -1.618046f;
+        case 0x3: return -1.256231f;
+        case 0x4: return -0.942340f;
+        case 0x5: return -0.656759f;
+        case 0x6: return -0.388048f;
+        case 0x7: return -0.128395f;
+        case 0x8: return  0.128395f;
+        case 0x9: return  0.388048f;
+        case 0xA: return  0.656759f;
+        case 0xB: return  0.942340f;
+        case 0xC: return  1.256231f;
+        case 0xD: return  1.618046f;
+        case 0xE: return  2.069017f;
+        default:  return  2.732590f;
+    }
+}
+
+static __device__ __forceinline__ float tq4_1s_sign_mmvq(const int idx) {
+    switch (idx) {
+        case 0:  return +1.0f;
+        case 1:  return -1.0f;
+        case 2:  return +1.0f;
+        case 3:  return -1.0f;
+        case 4:  return +1.0f;
+        case 5:  return +1.0f;
+        case 6:  return -1.0f;
+        case 7:  return +1.0f;
+        case 8:  return -1.0f;
+        case 9:  return -1.0f;
+        case 10: return +1.0f;
+        case 11: return -1.0f;
+        case 12: return +1.0f;
+        case 13: return +1.0f;
+        case 14: return -1.0f;
+        case 15: return +1.0f;
+        case 16: return -1.0f;
+        case 17: return -1.0f;
+        case 18: return +1.0f;
+        case 19: return -1.0f;
+        case 20: return +1.0f;
+        case 21: return -1.0f;
+        case 22: return -1.0f;
+        case 23: return +1.0f;
+        case 24: return -1.0f;
+        case 25: return +1.0f;
+        case 26: return +1.0f;
+        case 27: return -1.0f;
+        case 28: return +1.0f;
+        case 29: return -1.0f;
+        case 30: return -1.0f;
+        default: return +1.0f;
+    }
+}
+
+static __device__ __forceinline__ void tq4_1s_fwht32_mmvq(float * values) {
+    for (int step = 1; step < QK_TQ4_1S; step <<= 1) {
+        for (int base = 0; base < QK_TQ4_1S; base += step << 1) {
+#pragma unroll
+            for (int j = 0; j < step; ++j) {
+                const float a = values[base + j];
+                const float b = values[base + j + step];
+                values[base + j] = a + b;
+                values[base + j + step] = a - b;
+            }
+        }
+    }
+}
+
+static __device__ __forceinline__ void tq4_1s_rht_inverse_mmvq(float * values) {
+    tq4_1s_fwht32_mmvq(values);
+#pragma unroll
+    for (int i = 0; i < QK_TQ4_1S; ++i) {
+        values[i] *= 0.17677669529663688f * tq4_1s_sign_mmvq(i);
+    }
+}
+
 // VDR = vec dot ratio, how many contiguous integers each thread processes when the vec dot kernel is called
 // MMVQ = mul_mat_vec_q, MMQ = mul_mat_q
 
@@ -236,6 +316,8 @@ template <int vdr> static __device__ __forceinline__ float vec_dot_q5_1_q8_1_imp
 
 #define VDR_Q8_0_Q8_1_MMVQ 2
 #define VDR_Q8_0_Q8_1_MMQ 8
+
+#define VDR_TQ4_1S_Q8_1_MMVQ 1
 
 template <typename T, int vdr> static __device__ __forceinline__ T vec_dot_q8_0_q8_1_impl(
     const int * v, const int * u, const T & d8_0, const T & d8_1) {
@@ -761,6 +843,38 @@ static __device__ __forceinline__ float vec_dot_q8_0_q8_1(
     }
 
     return vec_dot_q8_0_q8_1_impl<float, VDR_Q8_0_Q8_1_MMVQ>(v, u, bq8_0->d, __low2half(bq8_1->ds));
+}
+
+static __device__ __forceinline__ float vec_dot_tq4_1s_q8_1(
+    const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
+
+    const block_tq4_1s * bq_tq4 = (const block_tq4_1s *) vbq + kbx;
+
+    float weights[QK_TQ4_1S];
+    const float d0 = __half2float(bq_tq4->d0);
+    const float d1 = __half2float(bq_tq4->d1);
+
+#pragma unroll
+    for (int i = 0; i < QK_TQ4_1S; ++i) {
+        const uint8_t packed = bq_tq4->qs[i / 2];
+        const uint8_t idx = (packed >> ((i & 1) * 4)) & 0x0F;
+        const float scale = i < QK_TQ4_1S / 2 ? d0 : d1;
+        weights[i] = tq4_1s_centroid_mmvq(idx) * scale;
+    }
+
+    tq4_1s_rht_inverse_mmvq(weights);
+
+    const float act_scale = __low2float(bq8_1->ds);
+    const int values_per_thread = QK_TQ4_1S / QI_TQ4_1S;
+    const int offset = iqs * values_per_thread;
+
+    float sum = 0.0f;
+#pragma unroll
+    for (int i = 0; i < values_per_thread; ++i) {
+        sum += weights[offset + i] * (act_scale * float(bq8_1->qs[offset + i]));
+    }
+
+    return sum;
 }
 
 static __device__ __forceinline__ float vec_dot_q2_K_q8_1(
