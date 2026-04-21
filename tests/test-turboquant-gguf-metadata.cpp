@@ -178,5 +178,21 @@ int main() {
         t.assert_true("mentions shared abi metadata", error.find("shared ABI metadata") != std::string::npos);
     });
 
+    t.test("llama_turboquant_load_gguf_metadata_accepts_spinor_minus_and_best_per_layer", [](testing & t) {
+        auto ctx = make_ctx();
+        populate_complete_metadata(ctx.get(), 2);
+        populate_public_weight_metadata(ctx.get());
+        set_str_array(ctx.get(), "tq_triality_mode", std::vector<std::string>{"triality-minus", "triality-minus"});
+        set_str_array(ctx.get(), "tq_triality_view", std::vector<std::string>{"minus", "minus"});
+        gguf_set_val_str(ctx.get(), "hypura.turboquant.runtime_mode", "best_per_layer");
+        gguf_set_val_str(ctx.get(), "hypura.turboquant.triality_view", "minus");
+
+        llama_turboquant_gguf_metadata metadata;
+        std::string error;
+        t.assert_true("parse succeeds", llama_turboquant_load_gguf_metadata(ctx.get(), 2, metadata, &error));
+        t.assert_equal("triality mode", std::string("key_only_block_so8_triality_minus"), metadata.layers[0].triality_mode);
+        t.assert_equal("triality view", std::string("spinor_minus_proxy"), metadata.layers[0].triality_view);
+    });
+
     return t.summary();
 }

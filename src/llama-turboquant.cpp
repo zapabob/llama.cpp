@@ -58,6 +58,9 @@ constexpr float TQ4_1S_INV_SQRT32 = 0.17677669529663688f;
 constexpr uint32_t TRIALITY_CODEBOOK_SIZE = 3;
 constexpr uint32_t TRIALITY_ROTATION_BLOCK_SIZE = 8;
 constexpr const char * TRIALITY_RUNTIME_MODE = "key_only_block_so8_triality_vector";
+constexpr const char * TRIALITY_RUNTIME_MODE_PLUS = "key_only_block_so8_triality_plus";
+constexpr const char * TRIALITY_RUNTIME_MODE_MINUS = "key_only_block_so8_triality_minus";
+constexpr const char * TRIALITY_RUNTIME_MODE_BEST_PER_LAYER = "key_only_block_so8_triality_best_per_layer";
 
 constexpr float kTq4CentroidsWeight[16] = {
     -2.732590f, -2.069017f, -1.618046f, -1.256231f,
@@ -82,6 +85,9 @@ constexpr float kTqWeightSigns[32] = {
 bool set_error(std::string * error, const std::string & message);
 std::string canonical_triality_view(std::string view);
 std::string canonical_runtime_mode(std::string mode);
+bool is_supported_triality_view(const std::string & view);
+bool is_supported_runtime_mode(const std::string & mode);
+bool runtime_mode_matches_view(const std::string & mode, const std::string & view);
 
 bool validate_tq4_reference_shape(
     const size_t value_count,
@@ -258,10 +264,12 @@ bool parse_artifact_metadata(
 
     metadata.triality_mode = canonical_runtime_mode(metadata.triality_mode);
     metadata.triality_view = canonical_triality_view(metadata.triality_view);
-    if (metadata.triality_mode != TRIALITY_RUNTIME_MODE) {
+    if (!is_supported_runtime_mode(metadata.triality_mode) ||
+        metadata.triality_mode == TRIALITY_RUNTIME_MODE_BEST_PER_LAYER) {
         return set_error(error, "artifact metadata uses unsupported triality mode");
     }
-    if (metadata.triality_view != "vector") {
+    if (!is_supported_triality_view(metadata.triality_view) ||
+        !runtime_mode_matches_view(metadata.triality_mode, metadata.triality_view)) {
         return set_error(error, "artifact metadata uses unsupported triality view");
     }
 
@@ -436,7 +444,7 @@ bool llama_turboquant_runtime_allows_k(const llama_turboquant_runtime_config & c
     if (!cfg.enabled) {
         return false;
     }
-    return canonical_runtime_mode(cfg.mode) == TRIALITY_RUNTIME_MODE;
+    return is_supported_runtime_mode(canonical_runtime_mode(cfg.mode));
 }
 
 namespace {
@@ -463,7 +471,43 @@ std::string canonical_runtime_mode(std::string mode) {
     if (mode == "triality_vector" || mode == "research_kv_split" || mode == TRIALITY_RUNTIME_MODE) {
         return TRIALITY_RUNTIME_MODE;
     }
+    if (mode == "triality_plus" || mode == "spinor_plus_proxy" || mode == TRIALITY_RUNTIME_MODE_PLUS) {
+        return TRIALITY_RUNTIME_MODE_PLUS;
+    }
+    if (mode == "triality_minus" || mode == "spinor_minus_proxy" || mode == TRIALITY_RUNTIME_MODE_MINUS) {
+        return TRIALITY_RUNTIME_MODE_MINUS;
+    }
+    if (mode == "triality_best_per_layer" || mode == "best_per_layer" || mode == TRIALITY_RUNTIME_MODE_BEST_PER_LAYER) {
+        return TRIALITY_RUNTIME_MODE_BEST_PER_LAYER;
+    }
     return mode;
+}
+
+bool is_supported_triality_view(const std::string & view) {
+    return view == "vector" || view == "spinor_plus_proxy" || view == "spinor_minus_proxy";
+}
+
+bool is_supported_runtime_mode(const std::string & mode) {
+    return mode == TRIALITY_RUNTIME_MODE ||
+        mode == TRIALITY_RUNTIME_MODE_PLUS ||
+        mode == TRIALITY_RUNTIME_MODE_MINUS ||
+        mode == TRIALITY_RUNTIME_MODE_BEST_PER_LAYER;
+}
+
+bool runtime_mode_matches_view(const std::string & mode, const std::string & view) {
+    if (mode == TRIALITY_RUNTIME_MODE_BEST_PER_LAYER) {
+        return is_supported_triality_view(view);
+    }
+    if (mode == TRIALITY_RUNTIME_MODE) {
+        return view == "vector";
+    }
+    if (mode == TRIALITY_RUNTIME_MODE_PLUS) {
+        return view == "spinor_plus_proxy";
+    }
+    if (mode == TRIALITY_RUNTIME_MODE_MINUS) {
+        return view == "spinor_minus_proxy";
+    }
+    return false;
 }
 } // namespace
 
@@ -551,12 +595,13 @@ bool llama_turboquant_load_gguf_metadata(
             metadata.layers.clear();
             return false;
         }
-        if (layer.triality_mode != TRIALITY_RUNTIME_MODE) {
+        if (!is_supported_runtime_mode(layer.triality_mode)) {
             metadata.present = false;
             metadata.layers.clear();
             return set_error(error, std::string("GGUF TurboQuant metadata layer ") + std::to_string(i) + " uses unsupported triality mode");
         }
-        if (layer.triality_view != "vector") {
+        if (!is_supported_triality_view(layer.triality_view) ||
+            !runtime_mode_matches_view(layer.triality_mode, layer.triality_view)) {
             metadata.present = false;
             metadata.layers.clear();
             return set_error(error, std::string("GGUF TurboQuant metadata layer ") + std::to_string(i) + " uses unsupported triality view");
@@ -616,15 +661,16 @@ bool llama_turboquant_load_gguf_metadata(
 
     runtime_mode = canonical_runtime_mode(runtime_mode);
     public_triality_view = canonical_triality_view(public_triality_view);
-    if (runtime_mode != TRIALITY_RUNTIME_MODE) {
+    if (!is_supported_runtime_mode(runtime_mode)) {
         metadata.present = false;
         metadata.layers.clear();
         return set_error(error, "unsupported hypura.turboquant.runtime_mode");
     }
-    if (public_triality_view != "vector") {
+    if (!is_supported_triality_view(public_triality_view) ||
+        !runtime_mode_matches_view(runtime_mode, public_triality_view)) {
         metadata.present = false;
         metadata.layers.clear();
-        return set_error(error, "only vector triality view is accepted for the production shared ABI");
+        return set_error(error, "hypura.turboquant triality mode/view pair is inconsistent");
     }
 
     return true;

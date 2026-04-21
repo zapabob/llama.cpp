@@ -156,5 +156,34 @@ int main() {
         std::filesystem::remove(path);
     });
 
+    t.test("llama_turboquant_load_accepts_spinor_plus_artifact_metadata", [](testing & t) {
+        const auto path = make_temp_path("turboquant-plus-view");
+        write_artifact_file(
+            path,
+            {
+                "tq_schema_version=1",
+                "tq_total_bits=3.5",
+                "tq_runtime_bits_per_channel=3.25",
+                "tq_stage1_effective_bits=2.25",
+                "tq_qjl_bits=1",
+                "tq_qjl_dim=8",
+                "tq_rotation_policy=block_so8_learned",
+                "tq_rotation_seed=17",
+                "tq_qjl_seed=71",
+                "tq_triality_mode=triality-plus",
+                "tq_triality_view=plus",
+                "tq_stage1_allocation_scheme=magnitude-topk",
+                "tq_stage1_bitwidth_payload_dtype=uint8",
+                "tq_norm_dtype=float32",
+                "tq_sign_pack_format=int8_unpacked_binary",
+            });
+        llama_turboquant_artifact loaded;
+        std::string error;
+        t.assert_true("load succeeds", llama_turboquant_load_artifact(path.string(), loaded, &error));
+        t.assert_equal("triality mode", std::string("key_only_block_so8_triality_plus"), loaded.metadata.triality_mode);
+        t.assert_equal("triality view", std::string("spinor_plus_proxy"), loaded.metadata.triality_view);
+        std::filesystem::remove(path);
+    });
+
     return t.summary();
 }
