@@ -14,6 +14,8 @@ struct llama_turboquant_runtime_config {
     bool enabled = false;
     std::string mode = "key_only_block_so8_triality_vector";
     std::string triality_view = "vector";
+    std::string cache_type_k;
+    std::string cache_type_v;
     bool so8_enabled = true;
     bool so8_learned = false;
     bool triality_enabled = true;
@@ -88,6 +90,10 @@ struct llama_turboquant_gguf_metadata {
     bool present = false;
     uint32_t schema_version = 0;
     std::vector<llama_turboquant_gguf_layer_metadata> layers;
+    std::string public_runtime_mode;
+    std::string public_triality_view;
+    std::string public_cache_type_k;
+    std::string public_cache_type_v;
     llama_turboquant_weight_gguf_metadata weight;
 };
 

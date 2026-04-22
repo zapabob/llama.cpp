@@ -225,6 +225,32 @@ struct clip_ctx {
     }
 };
 
+static bool clip_proj_type_prefers_host_weights(projector_type proj_type) {
+    switch (proj_type) {
+        case PROJECTOR_TYPE_GEMMA4V:
+        case PROJECTOR_TYPE_GEMMA4A:
+            // Gemma 4 uses dedicated multimodal towers with learned position tables and
+            // clippable linear metadata. Keeping their mmproj weights in a host buffer
+            // avoids fragile accelerator-only weight allocation while preserving GPU
+            // compute through the scheduler.
+            return true;
+        default:
+            return false;
+    }
+}
+
+static ggml_backend_buffer_type_t clip_select_weight_buffer_type(const clip_ctx & ctx_clip) {
+    if (ctx_clip.backend == nullptr || ctx_clip.backend == ctx_clip.backend_cpu) {
+        return ggml_backend_get_default_buffer_type(ctx_clip.backend_cpu);
+    }
+
+    if (clip_proj_type_prefers_host_weights(ctx_clip.model.proj_type)) {
+        return ggml_backend_get_default_buffer_type(ctx_clip.backend_cpu);
+    }
+
+    return ggml_backend_get_default_buffer_type(ctx_clip.backend);
+}
+
 //
 // clip_graph
 //
@@ -2349,8 +2375,32 @@ struct clip_model_loader {
             std::vector<uint8_t> read_buf;
 
             // alloc memory and offload data
-            ggml_backend_buffer_type_t buft = ggml_backend_get_default_buffer_type(ctx_clip.backend);
+            ggml_backend_buffer_type_t buft = clip_select_weight_buffer_type(ctx_clip);
+            if (buft == ggml_backend_get_default_buffer_type(ctx_clip.backend_cpu) &&
+                ctx_clip.backend != nullptr &&
+                ctx_clip.backend != ctx_clip.backend_cpu) {
+                LOG_INF("%s: keeping %s weights on host buffer while %s handles compute\n",
+                        __func__,
+                        PROJECTOR_TYPE_NAMES[ctx_clip.model.proj_type].c_str(),
+                        ggml_backend_name(ctx_clip.backend));
+            }
+
             ctx_clip.buf.reset(ggml_backend_alloc_ctx_tensors_from_buft(ctx_clip.ctx_data.get(), buft));
+            if (!ctx_clip.buf && !ggml_backend_buft_is_host(buft)) {
+                ggml_backend_buffer_type_t buft_cpu = ggml_backend_get_default_buffer_type(ctx_clip.backend_cpu);
+                LOG_WRN("%s: failed to allocate %s weight buffer for %s; retrying on host\n",
+                        __func__,
+                        ggml_backend_buft_name(buft),
+                        PROJECTOR_TYPE_NAMES[ctx_clip.model.proj_type].c_str());
+                buft = buft_cpu;
+                ctx_clip.buf.reset(ggml_backend_alloc_ctx_tensors_from_buft(ctx_clip.ctx_data.get(), buft));
+            }
+            if (!ctx_clip.buf) {
+                throw std::runtime_error(string_format("%s: failed to allocate weight buffer for %s (%s)\n",
+                                                      __func__,
+                                                      PROJECTOR_TYPE_NAMES[ctx_clip.model.proj_type].c_str(),
+                                                      ggml_backend_buft_name(buft)));
+            }
             ggml_backend_buffer_set_usage(ctx_clip.buf.get(), GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
             for (auto & t : tensors_to_load) {
                 ggml_tensor * cur = ggml_get_tensor(ctx_clip.ctx_data.get(), t->name);
