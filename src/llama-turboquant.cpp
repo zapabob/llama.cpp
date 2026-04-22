@@ -61,6 +61,15 @@ constexpr const char * TRIALITY_RUNTIME_MODE = "key_only_block_so8_triality_vect
 constexpr const char * TRIALITY_RUNTIME_MODE_PLUS = "key_only_block_so8_triality_plus";
 constexpr const char * TRIALITY_RUNTIME_MODE_MINUS = "key_only_block_so8_triality_minus";
 constexpr const char * TRIALITY_RUNTIME_MODE_BEST_PER_LAYER = "key_only_block_so8_triality_best_per_layer";
+constexpr const char * TRIALITY_PUBLIC_CACHE_TYPE_K_VECTOR = "triality-vector";
+constexpr const char * TRIALITY_PUBLIC_CACHE_TYPE_K_PLUS = "triality-plus";
+constexpr const char * TRIALITY_PUBLIC_CACHE_TYPE_K_MINUS = "triality-minus";
+constexpr const char * TRIALITY_PUBLIC_CACHE_TYPE_K_BEST_PER_LAYER = "best_per_layer";
+constexpr const char * TURBOQUANT_PUBLIC_CACHE_TYPE_K_Q8_0 = "q8_0";
+constexpr const char * TURBOQUANT_PUBLIC_CACHE_TYPE_V_Q8_0 = "q8_0";
+constexpr const char * TURBOQUANT_PUBLIC_CACHE_TYPE_V_TURBO4 = "turbo4";
+constexpr const char * TURBOQUANT_PUBLIC_CACHE_TYPE_V_TURBO3 = "turbo3";
+constexpr const char * TURBOQUANT_PUBLIC_CACHE_TYPE_V_TURBO2 = "turbo2";
 
 constexpr float kTq4CentroidsWeight[16] = {
     -2.732590f, -2.069017f, -1.618046f, -1.256231f,
@@ -85,6 +94,13 @@ constexpr float kTqWeightSigns[32] = {
 bool set_error(std::string * error, const std::string & message);
 std::string canonical_triality_view(std::string view);
 std::string canonical_runtime_mode(std::string mode);
+std::string canonical_public_cache_type_k(std::string cache_type_k);
+std::string canonical_public_cache_type_v(std::string cache_type_v);
+std::string public_cache_type_k_from_runtime_mode(const std::string & mode);
+std::string public_cache_type_v_from_mode(const std::string & mode);
+bool is_supported_public_cache_type_k(const std::string & cache_type_k);
+bool is_supported_public_cache_type_v(const std::string & cache_type_v);
+bool public_cache_types_match_runtime_mode(const std::string & mode, const std::string & cache_type_k);
 bool is_supported_triality_view(const std::string & view);
 bool is_supported_runtime_mode(const std::string & mode);
 bool runtime_mode_matches_view(const std::string & mode, const std::string & view);
@@ -431,6 +447,18 @@ llama_turboquant_runtime_config llama_turboquant_runtime_from_env() {
     cfg.enabled = env_flag("LLAMA_TURBOQUANT", false);
     cfg.mode = canonical_runtime_mode(env_string("LLAMA_TURBOQUANT_MODE", TRIALITY_RUNTIME_MODE));
     cfg.triality_view = canonical_triality_view(env_string("LLAMA_TURBOQUANT_TRIALITY_VIEW", "vector"));
+    {
+        const std::string default_cache_type_k = public_cache_type_k_from_runtime_mode(cfg.mode);
+        const std::string default_cache_type_v = public_cache_type_v_from_mode(cfg.mode);
+        cfg.cache_type_k = canonical_public_cache_type_k(
+            env_string("LLAMA_TURBOQUANT_CACHE_TYPE_K", default_cache_type_k.c_str()));
+        cfg.cache_type_v = canonical_public_cache_type_v(
+            env_string("LLAMA_TURBOQUANT_CACHE_TYPE_V", default_cache_type_v.c_str()));
+        if (cfg.cache_type_k != TURBOQUANT_PUBLIC_CACHE_TYPE_K_Q8_0 &&
+            is_supported_public_cache_type_k(cfg.cache_type_k)) {
+            cfg.mode = canonical_runtime_mode(cfg.cache_type_k);
+        }
+    }
     cfg.so8_enabled = env_flag("LLAMA_TURBOQUANT_SO8", true);
     cfg.so8_learned = env_flag("LLAMA_TURBOQUANT_SO8_LEARNED", false);
     cfg.triality_enabled = env_flag("LLAMA_TURBOQUANT_TRIALITY", true);
@@ -444,7 +472,14 @@ bool llama_turboquant_runtime_allows_k(const llama_turboquant_runtime_config & c
     if (!cfg.enabled) {
         return false;
     }
-    return is_supported_runtime_mode(canonical_runtime_mode(cfg.mode));
+    const std::string canonical_mode = canonical_runtime_mode(cfg.mode);
+    std::string cache_type_k = canonical_public_cache_type_k(cfg.cache_type_k);
+    if (cache_type_k.empty()) {
+        cache_type_k = public_cache_type_k_from_runtime_mode(canonical_mode);
+    }
+    return cache_type_k != TURBOQUANT_PUBLIC_CACHE_TYPE_K_Q8_0 &&
+        is_supported_public_cache_type_k(cache_type_k) &&
+        public_cache_types_match_runtime_mode(canonical_mode, cache_type_k);
 }
 
 namespace {
@@ -483,6 +518,108 @@ std::string canonical_runtime_mode(std::string mode) {
     return mode;
 }
 
+std::string canonical_public_cache_type_k(std::string cache_type_k) {
+    std::transform(cache_type_k.begin(), cache_type_k.end(), cache_type_k.begin(), [](unsigned char c) {
+        return c == '-' ? '_' : static_cast<char>(std::tolower(c));
+    });
+    if (cache_type_k == "triality_vector" || cache_type_k == "vector" || cache_type_k == "research_kv_split" || cache_type_k == TRIALITY_RUNTIME_MODE) {
+        return TRIALITY_PUBLIC_CACHE_TYPE_K_VECTOR;
+    }
+    if (cache_type_k == "triality_plus" || cache_type_k == "spinor_plus_proxy" || cache_type_k == "plus" || cache_type_k == TRIALITY_RUNTIME_MODE_PLUS) {
+        return TRIALITY_PUBLIC_CACHE_TYPE_K_PLUS;
+    }
+    if (cache_type_k == "triality_minus" || cache_type_k == "spinor_minus_proxy" || cache_type_k == "minus" || cache_type_k == TRIALITY_RUNTIME_MODE_MINUS) {
+        return TRIALITY_PUBLIC_CACHE_TYPE_K_MINUS;
+    }
+    if (cache_type_k == "triality_best_per_layer" || cache_type_k == "best_per_layer" || cache_type_k == TRIALITY_RUNTIME_MODE_BEST_PER_LAYER) {
+        return TRIALITY_PUBLIC_CACHE_TYPE_K_BEST_PER_LAYER;
+    }
+    if (cache_type_k == TURBOQUANT_PUBLIC_CACHE_TYPE_K_Q8_0) {
+        return TURBOQUANT_PUBLIC_CACHE_TYPE_K_Q8_0;
+    }
+    return cache_type_k;
+}
+
+std::string canonical_public_cache_type_v(std::string cache_type_v) {
+    std::transform(cache_type_v.begin(), cache_type_v.end(), cache_type_v.begin(), [](unsigned char c) {
+        return c == '-' ? '_' : static_cast<char>(std::tolower(c));
+    });
+    if (cache_type_v == TURBOQUANT_PUBLIC_CACHE_TYPE_V_Q8_0) {
+        return TURBOQUANT_PUBLIC_CACHE_TYPE_V_Q8_0;
+    }
+    if (cache_type_v == TURBOQUANT_PUBLIC_CACHE_TYPE_V_TURBO4) {
+        return TURBOQUANT_PUBLIC_CACHE_TYPE_V_TURBO4;
+    }
+    if (cache_type_v == TURBOQUANT_PUBLIC_CACHE_TYPE_V_TURBO3) {
+        return TURBOQUANT_PUBLIC_CACHE_TYPE_V_TURBO3;
+    }
+    if (cache_type_v == TURBOQUANT_PUBLIC_CACHE_TYPE_V_TURBO2) {
+        return TURBOQUANT_PUBLIC_CACHE_TYPE_V_TURBO2;
+    }
+    return cache_type_v;
+}
+
+std::string public_cache_type_k_from_runtime_mode(const std::string & mode) {
+    const std::string canonical_mode = canonical_runtime_mode(mode);
+    if (canonical_mode == TRIALITY_RUNTIME_MODE) {
+        return TRIALITY_PUBLIC_CACHE_TYPE_K_VECTOR;
+    }
+    if (canonical_mode == TRIALITY_RUNTIME_MODE_PLUS) {
+        return TRIALITY_PUBLIC_CACHE_TYPE_K_PLUS;
+    }
+    if (canonical_mode == TRIALITY_RUNTIME_MODE_MINUS) {
+        return TRIALITY_PUBLIC_CACHE_TYPE_K_MINUS;
+    }
+    if (canonical_mode == TRIALITY_RUNTIME_MODE_BEST_PER_LAYER) {
+        return TRIALITY_PUBLIC_CACHE_TYPE_K_BEST_PER_LAYER;
+    }
+    if (canonical_mode == "asym_q8_turbo4" || canonical_mode == "asym_q8_turbo3" || canonical_mode == "asym_q8_turbo2") {
+        return TURBOQUANT_PUBLIC_CACHE_TYPE_K_Q8_0;
+    }
+    return canonical_public_cache_type_k(canonical_mode);
+}
+
+std::string public_cache_type_v_from_mode(const std::string & mode) {
+    const std::string canonical_mode = canonical_runtime_mode(mode);
+    if (canonical_mode == "asym_q8_turbo4") {
+        return TURBOQUANT_PUBLIC_CACHE_TYPE_V_TURBO4;
+    }
+    if (canonical_mode == "asym_q8_turbo3") {
+        return TURBOQUANT_PUBLIC_CACHE_TYPE_V_TURBO3;
+    }
+    if (canonical_mode == "asym_q8_turbo2") {
+        return TURBOQUANT_PUBLIC_CACHE_TYPE_V_TURBO2;
+    }
+    return TURBOQUANT_PUBLIC_CACHE_TYPE_V_Q8_0;
+}
+
+bool is_supported_public_cache_type_k(const std::string & cache_type_k) {
+    return cache_type_k == TRIALITY_PUBLIC_CACHE_TYPE_K_VECTOR ||
+        cache_type_k == TRIALITY_PUBLIC_CACHE_TYPE_K_PLUS ||
+        cache_type_k == TRIALITY_PUBLIC_CACHE_TYPE_K_MINUS ||
+        cache_type_k == TRIALITY_PUBLIC_CACHE_TYPE_K_BEST_PER_LAYER ||
+        cache_type_k == TURBOQUANT_PUBLIC_CACHE_TYPE_K_Q8_0;
+}
+
+bool is_supported_public_cache_type_v(const std::string & cache_type_v) {
+    return cache_type_v == TURBOQUANT_PUBLIC_CACHE_TYPE_V_Q8_0 ||
+        cache_type_v == TURBOQUANT_PUBLIC_CACHE_TYPE_V_TURBO4 ||
+        cache_type_v == TURBOQUANT_PUBLIC_CACHE_TYPE_V_TURBO3 ||
+        cache_type_v == TURBOQUANT_PUBLIC_CACHE_TYPE_V_TURBO2;
+}
+
+bool public_cache_types_match_runtime_mode(const std::string & mode, const std::string & cache_type_k) {
+    const std::string canonical_mode = canonical_runtime_mode(mode);
+    const std::string canonical_cache_type_k = canonical_public_cache_type_k(cache_type_k);
+    if (canonical_mode == "asym_q8_turbo4" || canonical_mode == "asym_q8_turbo3" || canonical_mode == "asym_q8_turbo2") {
+        return canonical_cache_type_k == TURBOQUANT_PUBLIC_CACHE_TYPE_K_Q8_0;
+    }
+    if (is_supported_runtime_mode(canonical_mode)) {
+        return public_cache_type_k_from_runtime_mode(canonical_mode) == canonical_cache_type_k;
+    }
+    return false;
+}
+
 bool is_supported_triality_view(const std::string & view) {
     return view == "vector" || view == "spinor_plus_proxy" || view == "spinor_minus_proxy";
 }
@@ -515,7 +652,16 @@ bool llama_turboquant_runtime_allows_v(const llama_turboquant_runtime_config & c
     if (!cfg.enabled) {
         return false;
     }
-    return cfg.mode == "asym_q8_turbo4" || cfg.mode == "asym_q8_turbo3";
+    std::string cache_type_v = canonical_public_cache_type_v(cfg.cache_type_v);
+    if (cache_type_v.empty()) {
+        cache_type_v = public_cache_type_v_from_mode(cfg.mode);
+    }
+    return cache_type_v == TURBOQUANT_PUBLIC_CACHE_TYPE_V_TURBO4 ||
+        cache_type_v == TURBOQUANT_PUBLIC_CACHE_TYPE_V_TURBO3 ||
+        cache_type_v == TURBOQUANT_PUBLIC_CACHE_TYPE_V_TURBO2 ||
+        cfg.mode == "asym_q8_turbo4" ||
+        cfg.mode == "asym_q8_turbo3" ||
+        cfg.mode == "asym_q8_turbo2";
 }
 
 bool llama_turboquant_load_gguf_metadata(
@@ -624,6 +770,8 @@ bool llama_turboquant_load_gguf_metadata(
     float determinant_error_max = 0.0f;
     std::string runtime_mode;
     std::string public_triality_view;
+    std::string public_cache_type_k;
+    std::string public_cache_type_v;
     bool view_bundle_complete = false;
 
     if (!read_optional_string(ctx, "hypura.turboquant.codec", codec) ||
@@ -632,6 +780,8 @@ bool llama_turboquant_load_gguf_metadata(
         !read_optional_f32(ctx, "hypura.turboquant.determinant_error_max", determinant_error_max) ||
         !read_optional_string(ctx, "hypura.turboquant.runtime_mode", runtime_mode) ||
         !read_optional_string(ctx, "hypura.turboquant.triality_view", public_triality_view) ||
+        !read_optional_string(ctx, "hypura.turboquant.cache_type_k", public_cache_type_k) ||
+        !read_optional_string(ctx, "hypura.turboquant.cache_type_v", public_cache_type_v) ||
         !read_optional_bool(ctx, "hypura.turboquant.view_bundle_complete", view_bundle_complete)) {
         metadata.present = false;
         metadata.layers.clear();
@@ -661,6 +811,8 @@ bool llama_turboquant_load_gguf_metadata(
 
     runtime_mode = canonical_runtime_mode(runtime_mode);
     public_triality_view = canonical_triality_view(public_triality_view);
+    public_cache_type_k = canonical_public_cache_type_k(public_cache_type_k);
+    public_cache_type_v = canonical_public_cache_type_v(public_cache_type_v);
     if (!is_supported_runtime_mode(runtime_mode)) {
         metadata.present = false;
         metadata.layers.clear();
@@ -672,6 +824,22 @@ bool llama_turboquant_load_gguf_metadata(
         metadata.layers.clear();
         return set_error(error, "hypura.turboquant triality mode/view pair is inconsistent");
     }
+    if (!is_supported_public_cache_type_k(public_cache_type_k) ||
+        !public_cache_types_match_runtime_mode(runtime_mode, public_cache_type_k)) {
+        metadata.present = false;
+        metadata.layers.clear();
+        return set_error(error, "hypura.turboquant cache_type_k is inconsistent with runtime_mode");
+    }
+    if (!is_supported_public_cache_type_v(public_cache_type_v)) {
+        metadata.present = false;
+        metadata.layers.clear();
+        return set_error(error, "hypura.turboquant cache_type_v is unsupported");
+    }
+
+    metadata.public_runtime_mode = runtime_mode;
+    metadata.public_triality_view = public_triality_view;
+    metadata.public_cache_type_k = public_cache_type_k;
+    metadata.public_cache_type_v = public_cache_type_v;
 
     return true;
 }
