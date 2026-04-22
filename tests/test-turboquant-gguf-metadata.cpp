@@ -78,6 +78,8 @@ static void populate_public_weight_metadata(gguf_context * ctx) {
     gguf_set_val_bool(ctx, "hypura.turboquant.view_bundle_complete", true);
     gguf_set_val_str(ctx, "hypura.turboquant.runtime_mode", "research-kv-split");
     gguf_set_val_str(ctx, "hypura.turboquant.triality_view", "vector");
+    gguf_set_val_str(ctx, "hypura.turboquant.cache_type_k", "triality-vector");
+    gguf_set_val_str(ctx, "hypura.turboquant.cache_type_v", "q8_0");
     gguf_set_val_bool(ctx, "hypura.turboquant.weight.enabled", true);
     gguf_set_val_str(ctx, "hypura.turboquant.weight.source_ftype", "q8_0");
     gguf_set_val_str(ctx, "hypura.turboquant.weight.policy", "qwen35-full-attention-ffn");
@@ -123,6 +125,8 @@ int main() {
         t.assert_true("weight metadata enabled", metadata.weight.enabled);
         t.assert_equal("weight source ftype", std::string("q8_0"), metadata.weight.source_ftype);
         t.assert_equal("weight policy", std::string("qwen35-full-attention-ffn"), metadata.weight.policy);
+        t.assert_equal("public cache type k", std::string("triality-vector"), metadata.public_cache_type_k);
+        t.assert_equal("public cache type v", std::string("q8_0"), metadata.public_cache_type_v);
         t.assert_equal("weight modality scope", std::string("text-only"), metadata.weight.modality_scope);
         t.assert_equal("weight payload format", std::string("json-inline-v1"), metadata.weight.payload_format);
         t.assert_equal("weight payload bytes", uint64_t(32), metadata.weight.payload_bytes);
@@ -186,12 +190,16 @@ int main() {
         set_str_array(ctx.get(), "tq_triality_view", std::vector<std::string>{"minus", "minus"});
         gguf_set_val_str(ctx.get(), "hypura.turboquant.runtime_mode", "best_per_layer");
         gguf_set_val_str(ctx.get(), "hypura.turboquant.triality_view", "minus");
+        gguf_set_val_str(ctx.get(), "hypura.turboquant.cache_type_k", "best_per_layer");
+        gguf_set_val_str(ctx.get(), "hypura.turboquant.cache_type_v", "turbo4");
 
         llama_turboquant_gguf_metadata metadata;
         std::string error;
         t.assert_true("parse succeeds", llama_turboquant_load_gguf_metadata(ctx.get(), 2, metadata, &error));
         t.assert_equal("triality mode", std::string("key_only_block_so8_triality_minus"), metadata.layers[0].triality_mode);
         t.assert_equal("triality view", std::string("spinor_minus_proxy"), metadata.layers[0].triality_view);
+        t.assert_equal("public cache type k", std::string("best_per_layer"), metadata.public_cache_type_k);
+        t.assert_equal("public cache type v", std::string("turbo4"), metadata.public_cache_type_v);
     });
 
     return t.summary();

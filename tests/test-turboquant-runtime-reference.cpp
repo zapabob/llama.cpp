@@ -74,6 +74,12 @@ int main() {
         t.assert_true("research-kv-split alias is accepted", llama_turboquant_runtime_allows_k(cfg));
         cfg.mode = "triality-vector";
         t.assert_true("triality-vector alias is accepted", llama_turboquant_runtime_allows_k(cfg));
+        cfg.mode = "triality-plus";
+        t.assert_true("triality-plus alias is accepted", llama_turboquant_runtime_allows_k(cfg));
+        cfg.cache_type_v = "turbo2";
+        t.assert_true("turbo2 v-cache alias is accepted", llama_turboquant_runtime_allows_v(cfg));
+        cfg.cache_type_v = "turbo3";
+        t.assert_true("turbo3 v-cache alias is accepted", llama_turboquant_runtime_allows_v(cfg));
     });
 
     t.test("llama_turboquant_tq4_1s_reference_roundtrip_is_stable", [](testing & t) {
