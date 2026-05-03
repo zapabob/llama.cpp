@@ -72,8 +72,9 @@ static void populate_complete_metadata(gguf_context * ctx, uint32_t n_layers = 2
 
 static void populate_public_weight_metadata(gguf_context * ctx) {
     gguf_set_val_bool(ctx, "hypura.turboquant.weight.enabled", true);
+    gguf_set_val_str(ctx, "hypura.turboquant.weight.codec", "tq4_1s");
     gguf_set_val_str(ctx, "hypura.turboquant.weight.source_ftype", "q8_0");
-    gguf_set_val_str(ctx, "hypura.turboquant.weight.policy", "qwen35-full-attention-ffn");
+    gguf_set_val_str(ctx, "hypura.turboquant.weight.policy", "qwen35-config-i");
     gguf_set_val_str(
         ctx,
         "hypura.turboquant.weight.protected_roles",
@@ -81,8 +82,25 @@ static void populate_public_weight_metadata(gguf_context * ctx) {
     gguf_set_val_str(ctx, "hypura.turboquant.weight.protected_layers", "[0,1,30,31]");
     gguf_set_val_str(ctx, "hypura.turboquant.weight.modality_scope", "text-only");
     gguf_set_val_str(ctx, "hypura.turboquant.weight.payload_format", "json-inline-v1");
-    gguf_set_val_u64(ctx, "hypura.turboquant.weight.payload_bytes", 32);
-    gguf_set_val_str(ctx, "hypura.turboquant.weight.payload_json", "{\"enabled\":true}");
+    const std::string payload_json =
+        "{\"codec\":\"tq4_1s\","
+        "\"modality_scope\":\"text-only\","
+        "\"policy\":\"qwen35-config-i\","
+        "\"protected_layers\":[0,1,30,31],"
+        "\"protected_roles\":[\"embedding\",\"norm\",\"output_head\",\"recurrent_state\"],"
+        "\"schema\":\"hypura.turboquant.weight.v1\","
+        "\"source_ftype\":\"q8_0\","
+        "\"tensor_plan\":{"
+        "\"blk.*.attn_k.weight\":\"tq4_1s\","
+        "\"blk.*.attn_output.weight\":\"tq4_1s\","
+        "\"blk.*.attn_q.weight\":\"tq4_1s\","
+        "\"blk.*.attn_v.weight\":\"tq4_1s\","
+        "\"blk.*.ffn_down.weight\":\"q4_k\","
+        "\"blk.*.ffn_gate.weight\":\"tq4_1s\","
+        "\"blk.*.ffn_up.weight\":\"tq4_1s\"}"
+        "}";
+    gguf_set_val_u64(ctx, "hypura.turboquant.weight.payload_bytes", payload_json.size());
+    gguf_set_val_str(ctx, "hypura.turboquant.weight.payload_json", payload_json.c_str());
 }
 
 } // namespace
@@ -114,11 +132,15 @@ int main() {
         t.assert_equal("triality mode", std::string("triality_proxy"), metadata.layers[1].triality_mode);
         t.assert_equal("triality view", std::string("vector"), metadata.layers[1].triality_view);
         t.assert_true("weight metadata enabled", metadata.weight.enabled);
+        t.assert_equal("weight codec", std::string("tq4_1s"), metadata.weight.codec);
         t.assert_equal("weight source ftype", std::string("q8_0"), metadata.weight.source_ftype);
-        t.assert_equal("weight policy", std::string("qwen35-full-attention-ffn"), metadata.weight.policy);
+        t.assert_equal("weight policy", std::string("qwen35-config-i"), metadata.weight.policy);
         t.assert_equal("weight modality scope", std::string("text-only"), metadata.weight.modality_scope);
         t.assert_equal("weight payload format", std::string("json-inline-v1"), metadata.weight.payload_format);
-        t.assert_equal("weight payload bytes", uint64_t(32), metadata.weight.payload_bytes);
+        t.assert_true("weight payload validated", metadata.weight.payload_valid);
+        t.assert_true("weight codec supported", metadata.weight.codec_supported);
+        t.assert_equal("weight payload schema", std::string("hypura.turboquant.weight.v1"), metadata.weight.payload_schema);
+        t.assert_equal("weight tensor_plan entries", uint32_t(7), metadata.weight.tensor_plan_entries);
     });
 
     t.test("llama_turboquant_load_gguf_metadata_rejects_missing_required_key", [](testing & t) {
@@ -152,6 +174,39 @@ int main() {
         t.assert_true("parse fails", !llama_turboquant_load_gguf_metadata(ctx.get(), 2, metadata, &error));
         t.assert_true("mentions layer", error.find("layer 0") != std::string::npos);
         t.assert_true("mentions runtime bits", error.find("tq_runtime_bits_per_channel") != std::string::npos);
+    });
+
+    t.test("llama_turboquant_load_gguf_metadata_rejects_missing_weight_codec", [](testing & t) {
+        auto ctx = make_ctx();
+        populate_complete_metadata(ctx.get(), 2);
+        populate_public_weight_metadata(ctx.get());
+        gguf_remove_key(ctx.get(), "hypura.turboquant.weight.codec");
+
+        llama_turboquant_gguf_metadata metadata;
+        std::string error;
+        t.assert_true("parse fails", !llama_turboquant_load_gguf_metadata(ctx.get(), 2, metadata, &error));
+        t.assert_true("mentions codec", error.find("weight.codec") != std::string::npos);
+    });
+
+    t.test("llama_turboquant_load_gguf_metadata_rejects_missing_tensor_plan", [](testing & t) {
+        auto ctx = make_ctx();
+        populate_complete_metadata(ctx.get(), 2);
+        populate_public_weight_metadata(ctx.get());
+        const std::string payload_json =
+            "{\"codec\":\"tq4_1s\","
+            "\"modality_scope\":\"text-only\","
+            "\"policy\":\"qwen35-config-i\","
+            "\"protected_layers\":[0,1,30,31],"
+            "\"protected_roles\":[\"embedding\",\"norm\",\"output_head\",\"recurrent_state\"],"
+            "\"schema\":\"hypura.turboquant.weight.v1\","
+            "\"source_ftype\":\"q8_0\"}";
+        gguf_set_val_u64(ctx.get(), "hypura.turboquant.weight.payload_bytes", payload_json.size());
+        gguf_set_val_str(ctx.get(), "hypura.turboquant.weight.payload_json", payload_json.c_str());
+
+        llama_turboquant_gguf_metadata metadata;
+        std::string error;
+        t.assert_true("parse fails", !llama_turboquant_load_gguf_metadata(ctx.get(), 2, metadata, &error));
+        t.assert_true("mentions tensor_plan", error.find("tensor_plan") != std::string::npos);
     });
 
     return t.summary();

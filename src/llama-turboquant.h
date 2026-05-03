@@ -68,6 +68,7 @@ struct llama_turboquant_gguf_layer_metadata {
 
 struct llama_turboquant_weight_gguf_metadata {
     bool enabled = false;
+    std::string codec;
     std::string source_ftype;
     std::string policy;
     std::string protected_roles;
@@ -76,6 +77,10 @@ struct llama_turboquant_weight_gguf_metadata {
     std::string payload_format;
     uint64_t payload_bytes = 0;
     std::string payload_json;
+    std::string payload_schema;
+    bool payload_valid = false;
+    bool codec_supported = false;
+    uint32_t tensor_plan_entries = 0;
 };
 
 struct llama_turboquant_gguf_metadata {

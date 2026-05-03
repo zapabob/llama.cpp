@@ -7,10 +7,16 @@
 #include <fstream>
 #include <limits>
 #include <map>
+#include "../vendor/nlohmann/json.hpp"
 #include <sstream>
 
 namespace {
 constexpr float TURBOQUANT_FLOAT_EPS = 1e-6f;
+constexpr const char * TURBOQUANT_WEIGHT_CODEC_TQ4_1S = "tq4_1s";
+constexpr const char * TURBOQUANT_WEIGHT_SCHEMA_V1 = "hypura.turboquant.weight.v1";
+constexpr const char * TURBOQUANT_WEIGHT_PAYLOAD_FORMAT = "json-inline-v1";
+
+using ordered_json = nlohmann::ordered_json;
 
 bool env_flag(const char * name, bool fallback) {
     const char * v = std::getenv(name);
@@ -278,6 +284,109 @@ bool read_optional_string(
     out = gguf_get_val_str(ctx, key_id);
     return true;
 }
+
+bool parse_weight_json_list(
+    const ordered_json & payload,
+    const char * key,
+    std::string * error) {
+    if (!payload.contains(key) || !payload[key].is_array()) {
+        return set_error(error, std::string("weight payload is missing array key `") + key + "`");
+    }
+    return true;
+}
+
+bool validate_weight_payload(
+    llama_turboquant_weight_gguf_metadata & weight,
+    std::string * error) {
+    if (!weight.enabled) {
+        weight.payload_valid = false;
+        weight.codec_supported = false;
+        weight.tensor_plan_entries = 0;
+        return true;
+    }
+    if (weight.codec.empty()) {
+        return set_error(error, "missing GGUF weight metadata key `hypura.turboquant.weight.codec`");
+    }
+    if (weight.payload_format != TURBOQUANT_WEIGHT_PAYLOAD_FORMAT) {
+        return set_error(
+            error,
+            std::string("unsupported GGUF weight payload format `") + weight.payload_format
+                + "`; expected `" + TURBOQUANT_WEIGHT_PAYLOAD_FORMAT + "`");
+    }
+    if (weight.payload_json.empty()) {
+        return set_error(error, "missing GGUF weight payload json");
+    }
+    if (weight.payload_bytes != weight.payload_json.size()) {
+        return set_error(
+            error,
+            "GGUF weight payload bytes do not match payload_json length");
+    }
+
+    ordered_json payload;
+    try {
+        payload = ordered_json::parse(weight.payload_json);
+    } catch (const std::exception & exc) {
+        return set_error(error, std::string("invalid GGUF weight payload json: ") + exc.what());
+    }
+    if (!payload.is_object()) {
+        return set_error(error, "GGUF weight payload json must decode to an object");
+    }
+
+    if (!payload.contains("schema") || !payload["schema"].is_string()) {
+        return set_error(error, "weight payload is missing string key `schema`");
+    }
+    weight.payload_schema = payload["schema"].get<std::string>();
+    if (weight.payload_schema != TURBOQUANT_WEIGHT_SCHEMA_V1) {
+        return set_error(
+            error,
+            std::string("unsupported weight payload schema `") + weight.payload_schema
+                + "`; expected `" + TURBOQUANT_WEIGHT_SCHEMA_V1 + "`");
+    }
+    if (!payload.contains("codec") || !payload["codec"].is_string()) {
+        return set_error(error, "weight payload is missing string key `codec`");
+    }
+    const std::string payload_codec = payload["codec"].get<std::string>();
+    if (payload_codec != weight.codec) {
+        return set_error(error, "weight payload codec does not match GGUF weight codec metadata");
+    }
+    weight.codec_supported = payload_codec == TURBOQUANT_WEIGHT_CODEC_TQ4_1S;
+    if (!weight.codec_supported) {
+        return set_error(
+            error,
+            std::string("unsupported weight codec `") + payload_codec + "`");
+    }
+    if (!payload.contains("source_ftype") || !payload["source_ftype"].is_string()) {
+        return set_error(error, "weight payload is missing string key `source_ftype`");
+    }
+    if (payload["source_ftype"].get<std::string>() != weight.source_ftype) {
+        return set_error(error, "weight payload source_ftype does not match GGUF weight metadata");
+    }
+    if (!payload.contains("policy") || !payload["policy"].is_string()) {
+        return set_error(error, "weight payload is missing string key `policy`");
+    }
+    if (payload["policy"].get<std::string>() != weight.policy) {
+        return set_error(error, "weight payload policy does not match GGUF weight metadata");
+    }
+    if (!payload.contains("modality_scope") || !payload["modality_scope"].is_string()) {
+        return set_error(error, "weight payload is missing string key `modality_scope`");
+    }
+    if (payload["modality_scope"].get<std::string>() != weight.modality_scope) {
+        return set_error(error, "weight payload modality_scope does not match GGUF weight metadata");
+    }
+    if (!parse_weight_json_list(payload, "protected_roles", error) ||
+        !parse_weight_json_list(payload, "protected_layers", error)) {
+        return false;
+    }
+    if (!payload.contains("tensor_plan") || !payload["tensor_plan"].is_object()) {
+        return set_error(error, "weight payload is missing object key `tensor_plan`");
+    }
+    weight.tensor_plan_entries = static_cast<uint32_t>(payload["tensor_plan"].size());
+    if (weight.tensor_plan_entries == 0) {
+        return set_error(error, "weight payload tensor_plan must not be empty");
+    }
+    weight.payload_valid = true;
+    return true;
+}
 } // namespace
 
 llama_turboquant_runtime_config llama_turboquant_runtime_from_env() {
@@ -386,6 +495,7 @@ bool llama_turboquant_load_gguf_metadata(
     }
 
     read_optional_bool(ctx, "hypura.turboquant.weight.enabled", metadata.weight.enabled);
+    read_optional_string(ctx, "hypura.turboquant.weight.codec", metadata.weight.codec);
     read_optional_string(ctx, "hypura.turboquant.weight.source_ftype", metadata.weight.source_ftype);
     read_optional_string(ctx, "hypura.turboquant.weight.policy", metadata.weight.policy);
     read_optional_string(ctx, "hypura.turboquant.weight.protected_roles", metadata.weight.protected_roles);
@@ -394,6 +504,11 @@ bool llama_turboquant_load_gguf_metadata(
     read_optional_string(ctx, "hypura.turboquant.weight.payload_format", metadata.weight.payload_format);
     read_optional_u64(ctx, "hypura.turboquant.weight.payload_bytes", metadata.weight.payload_bytes);
     read_optional_string(ctx, "hypura.turboquant.weight.payload_json", metadata.weight.payload_json);
+    if (!validate_weight_payload(metadata.weight, error)) {
+        metadata.present = false;
+        metadata.layers.clear();
+        return false;
+    }
 
     return true;
 }

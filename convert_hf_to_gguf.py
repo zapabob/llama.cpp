@@ -1035,11 +1035,17 @@ class ModelBase:
         else:
             protected_layers = boundary_layers
 
+        is_qwen35_family = "qwen" in normalized_family and "3.5" in normalized_family
+        is_gemma4_family = "gemma-4" in normalized_family or ("gemma" in normalized_family and " 4" in normalized_family)
+        is_gemma4_multimodal = is_gemma4_family and any(
+            tag in normalized_family for tag in ("-e2b", "-e4b", "-a4b")
+        )
+
         if self.turboquant_weight_protected_roles is not None:
             protected_roles = json.loads(self.turboquant_weight_protected_roles)
-        elif "qwen" in normalized_family and "3.5-9b" in normalized_family:
+        elif is_qwen35_family:
             protected_roles = ["embedding", "norm", "output_head", "recurrent_state"]
-        elif "gemma" in normalized_family and "e4b" in normalized_family:
+        elif is_gemma4_family:
             protected_roles = [
                 "vision_encoder",
                 "audio_encoder",
@@ -1054,28 +1060,40 @@ class ModelBase:
 
         if self.turboquant_weight_policy is not None:
             weight_policy = self.turboquant_weight_policy
-        elif "qwen" in normalized_family and "3.5-9b" in normalized_family:
-            weight_policy = "qwen35-full-attention-ffn"
-        elif "gemma" in normalized_family and "e4b" in normalized_family:
-            weight_policy = "gemma4-e4b-shared-decoder-hybrid"
+        elif is_qwen35_family:
+            weight_policy = "qwen35-config-i"
+        elif is_gemma4_family:
+            weight_policy = "gemma4-kv-first-multimodal-safe"
         else:
             weight_policy = "shared-decoder-role-aware"
 
         if self.turboquant_weight_modality_scope is not None:
             weight_modality_scope = self.turboquant_weight_modality_scope
-        elif "gemma" in normalized_family and "e4b" in normalized_family:
+        elif is_gemma4_multimodal:
             weight_modality_scope = "full-multimodal"
         else:
             weight_modality_scope = "text-only"
 
+        tensor_plan = {
+            "blk.*.attn_q.weight": "tq4_1s",
+            "blk.*.attn_k.weight": "tq4_1s",
+            "blk.*.attn_v.weight": "tq4_1s",
+            "blk.*.attn_output.weight": "tq4_1s",
+            "blk.*.ffn_gate.weight": "tq4_1s",
+            "blk.*.ffn_up.weight": "tq4_1s",
+            "blk.*.ffn_down.weight": "q4_k",
+        }
         weight_payload = {
             "enabled": bool(self.turboquant_weight_enabled),
+            "schema": "hypura.turboquant.weight.v1",
+            "codec": "tq4_1s",
             "model_family": model_family,
             "source_ftype": weight_source_ftype,
             "policy": weight_policy,
             "protected_roles": protected_roles,
             "protected_layers": protected_layers,
             "modality_scope": weight_modality_scope,
+            "tensor_plan": tensor_plan,
         }
         weight_payload_json = json.dumps(weight_payload, sort_keys=True, separators=(",", ":"))
 
@@ -1148,6 +1166,10 @@ class ModelBase:
         self.gguf_writer.add_bool(
             "hypura.turboquant.weight.enabled",
             bool(self.turboquant_weight_enabled),
+        )
+        self.gguf_writer.add_string(
+            "hypura.turboquant.weight.codec",
+            "tq4_1s",
         )
         self.gguf_writer.add_string(
             "hypura.turboquant.weight.source_ftype",
