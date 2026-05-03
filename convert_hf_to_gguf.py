@@ -960,7 +960,109 @@ class ModelBase:
         logger.info("Set model quantization version")
         self.gguf_writer.add_quantization_version(gguf.GGML_QUANT_VERSION)
 
+        self.add_elt_metadata()
         self.add_hypura_turboquant_metadata()
+
+    @staticmethod
+    def _find_first_value(obj: dict[str, Any], keys: Iterable[str], default: Any = None) -> Any:
+        for key in keys:
+            if key in obj and obj[key] is not None:
+                return obj[key]
+        return default
+
+    def _get_elt_metadata_payload(self) -> dict[str, Any] | None:
+        elt_config = self.hparams.get("elt_config")
+        if not isinstance(elt_config, dict):
+            return None
+
+        enabled = bool(self._find_first_value(elt_config, ["loop_enabled", "enabled"], True))
+        required = bool(
+            self._find_first_value(
+                elt_config,
+                ["looped_runtime_required", "loop_required", "required", "requires_loop"],
+                True,
+            )
+        )
+
+        l_min = int(self._find_first_value(elt_config, ["L_min", "l_min", "min_L", "min_loop_count", "n_loop_min"], 1))
+        l_max = int(self._find_first_value(elt_config, ["L_max", "l_max", "max_L", "max_loop_count", "n_loop_max"], l_min))
+        l_default = int(
+            self._find_first_value(
+                elt_config,
+                ["L_default", "l_default", "default_L", "default_loop_count", "n_loop_default"],
+                l_max,
+            )
+        )
+
+        if l_min < 0 or l_max < 0 or l_default < 0:
+            raise ValueError("elt_config loop counts must be non-negative")
+        if l_min > l_max:
+            raise ValueError("elt_config L_min must be <= L_max")
+
+        source_model_id = self._find_first_value(
+            elt_config,
+            ["source_model_id", "base_model_id", "source_model", "base_model"],
+            self.remote_hf_model_id or self.model_name or self.dir_model.name,
+        )
+        backbone_kind = self._find_first_value(
+            elt_config,
+            ["backbone_kind", "backbone", "base_architecture"],
+            gguf.MODEL_ARCH_NAMES[self.model_arch],
+        )
+        turboquant_model_family = self._find_first_value(
+            elt_config,
+            ["turboquant_model_family", "model_family", "loop_model_family"],
+            "ELT/Qwen3.5-looped" if required or l_max > 1 or l_min > 1 else str(source_model_id),
+        )
+
+        return {
+            "schema": str(self._find_first_value(elt_config, ["schema"], "elt.looped_qwen35.v1")),
+            "loop_enabled": enabled,
+            "loop_required": required,
+            "L_min": l_min,
+            "L_max": l_max,
+            "L_default": l_default,
+            "loop_unit": str(self._find_first_value(elt_config, ["loop_unit", "unit", "recurrence_unit"], "layer")),
+            "backbone_kind": str(backbone_kind),
+            "source_model_id": str(source_model_id),
+            "gguf_architecture": str(
+                self._find_first_value(
+                    elt_config,
+                    ["gguf_architecture", "gguf_arch", "runtime_architecture"],
+                    gguf.MODEL_ARCH_NAMES[self.model_arch],
+                )
+            ),
+            "gguf_runtime_status": str(
+                self._find_first_value(
+                    elt_config,
+                    ["gguf_runtime_status", "runtime_status"],
+                    "requires_looped_qwen35_runtime" if required else "plain_qwen35_compatible",
+                )
+            ),
+            "turboquant_model_family": str(turboquant_model_family),
+        }
+
+    def add_elt_metadata(self) -> None:
+        payload = self._get_elt_metadata_payload()
+        if payload is None:
+            return
+
+        self.gguf_writer.add_string("elt.schema", payload["schema"])
+        self.gguf_writer.add_bool("elt.loop.enabled", payload["loop_enabled"])
+        self.gguf_writer.add_bool("elt.loop.required", payload["loop_required"])
+        self.gguf_writer.add_uint32("elt.loop.min", payload["L_min"])
+        self.gguf_writer.add_uint32("elt.loop.max", payload["L_max"])
+        self.gguf_writer.add_uint32("elt.loop.default", payload["L_default"])
+        self.gguf_writer.add_uint32("elt.loop.L_min", payload["L_min"])
+        self.gguf_writer.add_uint32("elt.loop.L_max", payload["L_max"])
+        self.gguf_writer.add_uint32("elt.loop.L_default", payload["L_default"])
+        self.gguf_writer.add_string("elt.loop_unit", payload["loop_unit"])
+        self.gguf_writer.add_string("elt.backbone_kind", payload["backbone_kind"])
+        self.gguf_writer.add_string("elt.source_model_id", payload["source_model_id"])
+        self.gguf_writer.add_string("elt.gguf.architecture", payload["gguf_architecture"])
+        self.gguf_writer.add_string("elt.gguf.runtime_status", payload["gguf_runtime_status"])
+        self.gguf_writer.add_string("elt.model_family", payload["turboquant_model_family"])
+        self.gguf_writer.add_string("elt.loop.model_family", payload["turboquant_model_family"])
 
     def add_hypura_turboquant_metadata(self) -> None:
         if self.turboquant_mode is None:
@@ -984,8 +1086,18 @@ class ModelBase:
             "triality_spinor_minus": "block_so8_learned",
         }.get(rotation_policy_alias, rotation_policy_alias)
         triality_mode = "triality_proxy" if triality_view is not None else "disabled"
-        model_family = self.remote_hf_model_id or self.model_name or self.dir_model.name
-        normalized_family = model_family.lower()
+        source_model_family = self.remote_hf_model_id or self.model_name or self.dir_model.name
+        elt_payload = self._get_elt_metadata_payload()
+        model_family = (
+            elt_payload["turboquant_model_family"]
+            if elt_payload and elt_payload["loop_required"]
+            else source_model_family
+        )
+        normalized_family = " ".join(
+            str(value)
+            for value in [source_model_family, elt_payload.get("source_model_id") if elt_payload else ""]
+            if value
+        ).lower()
         weight_source_ftype = (self.turboquant_weight_source_ftype or "q8_0").lower()
         if weight_source_ftype not in {"bf16", "f16", "q8_0"}:
             raise ValueError(
@@ -1077,6 +1189,8 @@ class ModelBase:
             "protected_layers": protected_layers,
             "modality_scope": weight_modality_scope,
         }
+        if elt_payload:
+            weight_payload["elt"] = elt_payload
         weight_payload_json = json.dumps(weight_payload, sort_keys=True, separators=(",", ":"))
 
         n_layers = max(int(self.block_count), 1)
