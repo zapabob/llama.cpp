@@ -275,7 +275,7 @@ if (NOT GGML_BACKEND_DL)
                 ${PROJECT_SOURCE_DIR}/ggml/src
                 ${PROJECT_SOURCE_DIR}/ggml/src/ggml-cuda
             )
-            target_link_libraries(test-turboquant-cuda-kernels PRIVATE common ggml-cuda)
+            target_link_libraries(test-turboquant-cuda-kernels PRIVATE llama-common ggml-cuda)
             if (LLAMA_TESTS_INSTALL)
                 install(TARGETS test-turboquant-cuda-kernels RUNTIME)
             endif()

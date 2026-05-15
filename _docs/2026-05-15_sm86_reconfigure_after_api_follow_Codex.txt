@@ -1,0 +1,21 @@
+CMAKE_BUILD_TYPE=Release
+-- sccache found, compilation results will be cached. Disable with GGML_CCACHE=OFF.
+-- CMAKE_SYSTEM_PROCESSOR: AMD64
+-- CMAKE_GENERATOR_PLATFORM: 
+-- GGML_SYSTEM_ARCH: x86
+-- Including CPU backend
+-- x86 detected
+-- Adding CPU backend variant ggml-cpu: /arch:AVX2 GGML_AVX2;GGML_FMA;GGML_F16C;__BMI2__;GGML_BMI2
+-- CUDA Toolkit found
+-- Using CMAKE_CUDA_ARCHITECTURES=86 CMAKE_CUDA_ARCHITECTURES_NATIVE=86-real
+-- Could NOT find NCCL (missing: NCCL_LIBRARY NCCL_INCLUDE_DIR) 
+-- Warning: NCCL not found, performance for multiple CUDA GPUs will be suboptimal
+-- Including CUDA backend
+-- ggml version: 0.11.1
+-- ggml commit:  b6184ab44
+-- OpenSSL found: 3.6.2
+-- Generating embedded license file for target: llama-common
+-- Configuring done (2.9s)
+-- Generating done (0.4s)
+-- Build files have been written to: H:/llama-cpp-zapabob-upstream-20260515-build
+EXITCODE=0
