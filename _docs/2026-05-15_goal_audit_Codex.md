@@ -17,6 +17,22 @@ Bring the latest official `ggml-org/llama.cpp` functionality, vulnerability-rela
 | Actual compile/link | Not run after the user narrowed the request to dry-run only. The build directory currently lacks `llama-server.exe`, `llama-cli.exe`, and `llama-turboquant.exe`. | Missing |
 | Overwrite install on this PC | Not run after the user narrowed the request to dry-run only. Existing install slot `C:\Users\downl\AppData\Local\Programs\llama-turboquant\bin` was not modified. | Missing |
 
+## Current State Snapshot
+
+- Repository branch: `codex/upstream-sync-2026-05-15`.
+- Repository head: `d4f87b647 docs: record upstream sync dry-run audit`.
+- Merge commit: `68943e967 merge: upstream ggml-org llama.cpp master 2026-05-15; keep Triality TurboQuant`.
+- Upstream master included: `5c0e94683`.
+- Git worktree status: clean.
+- Build cache: `H:\llama-cpp-zapabob-upstream-20260515-build\CMakeCache.txt`.
+- CUDA scope: `CMAKE_CUDA_ARCHITECTURES=86`, suitable for RTX 3060 / RTX 3080 sm_86.
+- Existing partial build outputs in `H:\llama-cpp-zapabob-upstream-20260515-build\bin`: `ggml-base.dll`, `ggml-cpu.dll`, `ggml-cuda.dll`, `ggml.dll`, `llama-common.dll`, `llama.dll`.
+- Missing in the build output directory after dry-run: `llama-server.exe`, `llama-cli.exe`, `llama-turboquant.exe`.
+- Existing installed runtime slot still contains older executable timestamps:
+  - `C:\Users\downl\AppData\Local\Programs\llama-turboquant\bin\llama-server.exe` from 2026-04-22.
+  - `C:\Users\downl\AppData\Local\Programs\llama-turboquant\bin\llama-cli.exe` from 2026-04-22.
+  - `C:\Users\downl\AppData\Local\Programs\llama-turboquant\bin\llama-turboquant.exe` from 2026-03-30.
+
 ## Completion Decision
 
 The upstream merge and dry-run compile-plan check are complete, but the full active goal is not complete because actual build outputs and overwrite install were intentionally not produced after the latest dry-run-only instruction.
