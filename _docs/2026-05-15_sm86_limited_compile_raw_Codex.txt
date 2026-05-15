@@ -1,16 +1,16 @@
 ninja: Entering directory `H:\llama-cpp-zapabob-upstream-20260515-build'
 [1/10] Linking CXX executable bin\llama-turboquant.exe
-FAILED: bin/llama-turboquant.exe 
+FAILED: bin/llama-turboquant.exe
 C:\WINDOWS\system32\cmd.exe /C "cd . && "C:\Program Files\CMake\bin\cmake.exe" -E vs_link_exe --msvc-ver=1944 --intdir=tools\turboquant\CMakeFiles\llama-turboquant.dir --rc=C:\PROGRA~2\WI3CF2~1\10\bin\100261~1.0\x64\rc.exe --mt=C:\PROGRA~2\WI3CF2~1\10\bin\100261~1.0\x64\mt.exe --manifests  -- C:\PROGRA~1\MICROS~4\2022\COMMUN~1\VC\Tools\MSVC\1444~1.352\bin\Hostx64\x64\link.exe /nologo tools\turboquant\CMakeFiles\llama-turboquant.dir\turboquant.cpp.obj tools\turboquant\CMakeFiles\llama-turboquant.dir\__\__\src\llama-turboquant.cpp.obj  /out:bin\llama-turboquant.exe /implib:tools\turboquant\llama-turboquant.lib /pdb:bin\llama-turboquant.pdb /version:0.0 /machine:x64 /INCREMENTAL:NO /subsystem:console  common.lib  src\llama.lib  ggml\src\ggml.lib  ggml\src\ggml-cpu.lib  ggml\src\ggml-cuda\ggml-cuda.lib  ggml\src\ggml-base.lib  kernel32.lib user32.lib gdi32.lib winspool.lib shell32.lib ole32.lib oleaut32.lib uuid.lib comdlg32.lib advapi32.lib && cd ."
 LINK: command "C:\PROGRA~1\MICROS~4\2022\COMMUN~1\VC\Tools\MSVC\1444~1.352\bin\Hostx64\x64\link.exe /nologo tools\turboquant\CMakeFiles\llama-turboquant.dir\turboquant.cpp.obj tools\turboquant\CMakeFiles\llama-turboquant.dir\__\__\src\llama-turboquant.cpp.obj /out:bin\llama-turboquant.exe /implib:tools\turboquant\llama-turboquant.lib /pdb:bin\llama-turboquant.pdb /version:0.0 /machine:x64 /INCREMENTAL:NO /subsystem:console common.lib src\llama.lib ggml\src\ggml.lib ggml\src\ggml-cpu.lib ggml\src\ggml-cuda\ggml-cuda.lib ggml\src\ggml-base.lib kernel32.lib user32.lib gdi32.lib winspool.lib shell32.lib ole32.lib oleaut32.lib uuid.lib comdlg32.lib advapi32.lib /MANIFEST:EMBED,ID=1" failed (exit code 1181) with the following output:
-LINK : fatal error LNK1181: 入力ファイル 'common.lib' を開けません。
+LINK : fatal error LNK1181: 蜈･蜉帙ヵ繧｡繧､繝ｫ 'common.lib' 繧帝幕縺代∪縺帙ｓ縲・
 [2/10] Building/provisioning WebUI assets (npm build -> HF Bucket fallback)
 -- WebUI: building from source in C:/Users/downl/Desktop/llama.cpp-zapabob/tools/server/webui
 -- WebUI: running npm install (first time)
 -- WebUI: npm install failed (no such file or directory), falling back to download
---   stderr: 
+--   stderr:
 -- WebUI: npm build failed (no such file or directory), falling back to download
---   stderr: 
+--   stderr:
 -- WebUI: downloading assets from version: https://huggingface.co/buckets/ggml-org/llama-ui/resolve/b9200
 -- WebUI: failed to download index.html from version: "SSL connect error.  If this is due to https certificate verification failure, one may set environment variable CMAKE_TLS_VERIFY=0 to suppress it."
 -- WebUI: downloading assets from latest: https://huggingface.co/buckets/ggml-org/llama-ui/resolve/latest
@@ -31,4 +31,4 @@ CMake Warning at C:/Users/downl/Desktop/llama.cpp-zapabob/scripts/webui-download
 
 
 ninja: build stopped: subcommand failed.
-EXITCODE=0 
+EXITCODE=0

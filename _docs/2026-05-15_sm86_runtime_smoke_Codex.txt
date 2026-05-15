@@ -1,12 +1,12 @@
-﻿# sm86 runtime smoke check
+# sm86 runtime smoke check
 timestamp_local=2026-05-15T13:50:09.0392153+09:00
 build_dir=H:\llama-cpp-zapabob-upstream-20260515-build\bin
 install_performed=false
 
 ## file inventory
 
-Name                   Length LastWriteTime      
-----                   ------ -------------      
+Name                   Length LastWriteTime
+----                   ------ -------------
 llama-server.exe      1759744 2026/05/15 13:45:45
 llama-cli.exe          729088 2026/05/15 13:45:38
 llama-turboquant.exe    88064 2026/05/15 13:45:39
