@@ -3,6 +3,7 @@
 
 #include "build-info.h"
 #include "common.h"
+#include "fit.h"
 #include "log.h"
 #include "llama.h"
 #include "sampling.h"
@@ -69,7 +70,7 @@ common_time_meas::~common_time_meas() {
 // CPU utils
 //
 
-int32_t cpu_get_num_physical_cores() {
+int32_t common_cpu_get_num_physical_cores() {
 #ifdef __linux__
     // enumerate the set of thread siblings, num entries is num cores
     std::unordered_set<std::string> siblings;
@@ -184,11 +185,11 @@ static int cpu_count_math_cpus(int n_cpu) {
 /**
  * Returns number of CPUs on system that are useful for math.
  */
-int32_t cpu_get_num_math() {
+int32_t common_cpu_get_num_math() {
 #if defined(__x86_64__) && defined(__linux__) && !defined(__ANDROID__)
     int n_cpu = sysconf(_SC_NPROCESSORS_ONLN);
     if (n_cpu < 1) {
-        return cpu_get_num_physical_cores();
+        return common_cpu_get_num_physical_cores();
     }
     if (is_hybrid_cpu()) {
         cpu_set_t affinity;
@@ -201,7 +202,7 @@ int32_t cpu_get_num_math() {
         }
     }
 #endif
-    return cpu_get_num_physical_cores();
+    return common_cpu_get_num_physical_cores();
 }
 
 // Helper for setting process priority
@@ -262,7 +263,7 @@ bool set_process_priority(enum ggml_sched_priority prio) {
 //
 
 
-void postprocess_cpu_params(cpu_params& cpuparams, const cpu_params* role_model) {
+void postprocess_cpu_params(common_cpu_params & cpuparams, const common_cpu_params * role_model) {
     int32_t n_set = 0;
 
     if (cpuparams.n_threads < 0) {
@@ -270,7 +271,7 @@ void postprocess_cpu_params(cpu_params& cpuparams, const cpu_params* role_model)
         if (role_model != nullptr) {
             cpuparams = *role_model;
         } else {
-            cpuparams.n_threads = cpu_get_num_math();
+            cpuparams.n_threads = common_cpu_get_num_math();
         }
     }
 
@@ -365,15 +366,29 @@ void common_init() {
     SetConsoleCP(CP_UTF8);
 #endif
 
-    llama_log_set(common_log_default_callback, NULL);
+    common_log_set_prefix(common_log_main(), true);
+    common_log_set_timestamps(common_log_main(), true);
 
+    llama_log_set(common_log_default_callback, NULL);
+}
+
+void common_params_print_info(const common_params & params) {
 #ifdef NDEBUG
     const char * build_type = "";
 #else
     const char * build_type = " (debug)";
 #endif
+    LOG_TRC("%s: build %d (%s) with %s for %s%s\n", __func__, llama_build_number(), llama_commit(), llama_compiler(), llama_build_target(), build_type);
 
-    LOG_DBG("build: %d (%s) with %s for %s%s\n", llama_build_number(), llama_commit(), llama_compiler(), llama_build_target(), build_type);
+    LOG_INF("log_info: verbosity = %d (adjust with the `-lv N` CLI arg)\n", common_log_get_verbosity_thold());
+    LOG_INF("device_info:\n");
+    for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
+        auto * dev = ggml_backend_dev_get(i);
+        size_t free, total;
+        ggml_backend_dev_memory(dev, &free, &total);
+        LOG_INF("  - %-8s: %s (%zu MiB, %zu MiB free)\n", ggml_backend_dev_name(dev), ggml_backend_dev_description(dev), total / 1024 / 1024, free / 1024 / 1024);
+    }
+    LOG_INF("%s\n", common_params_get_system_info(params).c_str());
 }
 
 std::string common_params_get_system_info(const common_params & params) {
@@ -1146,8 +1161,9 @@ common_init_result::common_init_result(common_params & params) :
     auto cparams = common_context_params_to_llama(params);
 
     if (params.fit_params) {
-        LOG_INF("%s: fitting params to device memory, for bugs during this step try to reproduce them with -fit off, or provide --verbose logs if the bug only occurs with -fit on\n", __func__);
-        llama_params_fit(params.model.path.c_str(), &mparams, &cparams,
+        LOG_INF("%s: fitting params to device memory ...\n", __func__);
+        LOG_INF("%s: (for bugs during this step try to reproduce them with -fit off, or provide --verbose logs if the bug only occurs with -fit on)\n", __func__);
+        common_fit_params(params.model.path.c_str(), &mparams, &cparams,
             params.tensor_split,
             params.tensor_buft_overrides.data(),
             params.fit_params_target.data(),
@@ -1195,7 +1211,7 @@ common_init_result::common_init_result(common_params & params) :
     // initialize once
     for (llama_token i = 0; i < llama_vocab_n_tokens(vocab); i++) {
         if (llama_vocab_is_eog(vocab, i)) {
-            LOG_INF("%s: added %s logit bias = %f\n", __func__, common_token_to_piece(vocab, i).c_str(), -INFINITY);
+            LOG_TRC("%s: added %s logit bias = %f\n", __func__, common_token_to_piece(vocab, i).c_str(), -INFINITY);
             params.sampling.logit_bias_eog.push_back({i, -INFINITY});
         }
     }
@@ -1208,12 +1224,12 @@ common_init_result::common_init_result(common_params & params) :
     }
 
     //if (params.sampling.penalty_last_n == -1) {
-    //    LOG_INF("%s: setting penalty_last_n to ctx_size = %d\n", __func__, llama_n_ctx(lctx));
+    //    LOG_TRC("%s: setting penalty_last_n to ctx_size = %d\n", __func__, llama_n_ctx(lctx));
     //    params.sampling.penalty_last_n = llama_n_ctx(lctx);
     //}
 
     //if (params.sampling.dry_penalty_last_n == -1) {
-    //    LOG_INF("%s: setting dry_penalty_last_n to ctx_size = %d\n", __func__, llama_n_ctx(lctx));
+    //    LOG_TRC("%s: setting dry_penalty_last_n to ctx_size = %d\n", __func__, llama_n_ctx(lctx));
     //    params.sampling.dry_penalty_last_n = llama_n_ctx(lctx);
     //}
 
@@ -1382,7 +1398,7 @@ common_init_result_ptr common_init_from_params(common_params & params) {
 
 common_init_result::~common_init_result() = default;
 
-std::string get_model_endpoint() {
+std::string common_get_model_endpoint() {
     const char * model_endpoint_env = getenv("MODEL_ENDPOINT");
     // We still respect the use of environment-variable "HF_ENDPOINT" for backward-compatibility.
     const char * hf_endpoint_env = getenv("HF_ENDPOINT");
@@ -1395,6 +1411,42 @@ std::string get_model_endpoint() {
         }
     }
     return model_endpoint;
+}
+
+common_context_seq_rm_type common_context_can_seq_rm(llama_context * ctx) {
+    auto * mem = llama_get_memory(ctx);
+    if (mem == nullptr) {
+        return COMMON_CONTEXT_SEQ_RM_TYPE_NO;
+    }
+
+    common_context_seq_rm_type res = COMMON_CONTEXT_SEQ_RM_TYPE_PART;
+
+    llama_memory_clear(mem, true);
+
+    // eval 2 tokens to check if the context is compatible
+    std::vector<llama_token> tmp;
+    tmp.push_back(0);
+    tmp.push_back(0);
+
+    int ret = llama_decode(ctx, llama_batch_get_one(tmp.data(), tmp.size()));
+    if (ret != 0) {
+        LOG_ERR("%s: llama_decode() failed: %d\n", __func__, ret);
+        res = COMMON_CONTEXT_SEQ_RM_TYPE_NO;
+        goto done;
+    }
+
+    // try to remove the last tokens
+    if (!llama_memory_seq_rm(mem, 0, 1, -1)) {
+        LOG_TRC("%s: the context does not support partial sequence removal\n", __func__);
+        res = COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
+        goto done;
+    }
+
+done:
+    llama_memory_clear(mem, true);
+    llama_synchronize(ctx);
+
+    return res;
 }
 
 void common_set_adapter_lora(struct llama_context * ctx, std::vector<common_adapter_lora_info> & lora) {
@@ -1484,7 +1536,7 @@ struct llama_context_params common_context_params_to_llama(const common_params &
     return cparams;
 }
 
-struct ggml_threadpool_params ggml_threadpool_params_from_cpu_params(const cpu_params & params) {
+struct ggml_threadpool_params ggml_threadpool_params_from_cpu_params(const common_cpu_params & params) {
     struct ggml_threadpool_params tpp;
 
     ggml_threadpool_params_init(&tpp, params.n_threads); // setup the defaults
@@ -1922,4 +1974,103 @@ bool common_prompt_batch_decode(
     }
 
     return true;
+}
+
+size_t common_prompt_checkpoint::size() const {
+    return data_tgt.size() + data_dft.size();
+}
+
+bool common_prompt_checkpoint::empty() const {
+    return data_tgt.empty();
+}
+
+void common_prompt_checkpoint::clear() {
+    n_tokens = 0;
+
+    pos_min = 0;
+    pos_max = 0;
+
+    data_tgt.clear();
+    data_dft.clear();
+}
+
+void common_prompt_checkpoint::update_pos(
+        int64_t n_tokens,
+        llama_pos pos_min,
+        llama_pos pos_max) {
+    this->n_tokens = n_tokens;
+    this->pos_min  = pos_min;
+    this->pos_max  = pos_max;
+}
+
+void common_prompt_checkpoint::update_tgt(
+        llama_context * ctx,
+        llama_seq_id seq_id,
+        llama_state_seq_flags flags) {
+    if (ctx == nullptr) {
+        return;
+    }
+
+    const size_t ckpt_size = llama_state_seq_get_size_ext(ctx, seq_id, flags);
+
+    data_tgt.resize(ckpt_size);
+
+    const size_t n = llama_state_seq_get_data_ext(ctx, data_tgt.data(), ckpt_size, seq_id, flags);
+    if (n != ckpt_size) {
+        GGML_ABORT("checkpoint size mismatch: expected %zu, got %zu\n", ckpt_size, n);
+    }
+}
+
+void common_prompt_checkpoint::update_dft(
+        llama_context * ctx,
+        llama_seq_id seq_id,
+        llama_state_seq_flags flags) {
+    if (ctx == nullptr) {
+        return;
+    }
+
+    const size_t ckpt_size = llama_state_seq_get_size_ext(ctx, seq_id, flags);
+
+    data_dft.resize(ckpt_size);
+
+    const size_t n = llama_state_seq_get_data_ext(ctx, data_dft.data(), ckpt_size, seq_id, flags);
+    if (n != ckpt_size) {
+        GGML_ABORT("checkpoint size mismatch: expected %zu, got %zu\n", ckpt_size, n);
+    }
+}
+
+void common_prompt_checkpoint::load_tgt(
+        llama_context * ctx,
+        llama_seq_id seq_id,
+        llama_state_seq_flags flags) const {
+    if (ctx == nullptr) {
+        return;
+    }
+
+    if (data_tgt.empty()) {
+        return;
+    }
+
+    const size_t n = llama_state_seq_set_data_ext(ctx, data_tgt.data(), data_tgt.size(), seq_id, flags);
+    if (n != data_tgt.size()) {
+        GGML_ABORT("checkpoint size mismatch: expected %zu, got %zu\n", data_tgt.size(), n);
+    }
+}
+
+void common_prompt_checkpoint::load_dft(
+        llama_context * ctx,
+        llama_seq_id seq_id,
+        llama_state_seq_flags flags) const {
+    if (ctx == nullptr) {
+        return;
+    }
+
+    if (data_dft.empty()) {
+        return;
+    }
+
+    const size_t n = llama_state_seq_set_data_ext(ctx, data_dft.data(), data_dft.size(), seq_id, flags);
+    if (n != data_dft.size()) {
+        GGML_ABORT("checkpoint size mismatch: expected %zu, got %zu\n", data_dft.size(), n);
+    }
 }
