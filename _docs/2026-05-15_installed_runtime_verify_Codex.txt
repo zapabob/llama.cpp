@@ -1,0 +1,26 @@
+﻿cwd=C:\Users\downl\Desktop\llama.cpp-zapabob
+head=0f7cd1406
+timestamp=2026-05-15T14:29:16.9819237+09:00
+install_bin=C:\Users\downl\AppData\Local\Programs\llama-turboquant\bin
+LLAMA_CPP_SERVER_EXE_USER=C:\Users\downl\AppData\Local\Programs\llama-turboquant\bin\llama-server.exe
+LLAMA_CPP_SERVER_EXE_PROCESS=C:\Users\downl\AppData\Local\Programs\llama-turboquant\bin\llama-server.exe
+--- where llama-server ---
+C:\Users\downl\AppData\Local\Programs\llama-turboquant\bin\llama-server.exe
+C:\Users\downl\AppData\Local\Microsoft\WinGet\Packages\ggml.llamacpp_Microsoft.Winget.Source_8wekyb3d8bbwe\llama-server.exe
+--- llama-server --version ---
+version: 9203 (0f7cd1406)
+built with MSVC 19.44.35224.0 for Windows AMD64
+--- llama-cli --version ---
+version: 9203 (0f7cd1406)
+built with MSVC 19.44.35224.0 for Windows AMD64
+--- llama-turboquant no-arg usage ---
+Usage:
+  llama-turboquant train --out <artifact.tq> [--head-dim N] [--vecs N] [--seed N] [--so8-learned 0|1] [--triality 0|1]
+  llama-turboquant eval  --artifact <artifact.tq> [--vecs N] [--seed N]
+llama-turboquant_exitcode=2
+--- nvidia-smi ---
+NVIDIA GeForce RTX 3060, 8.6, 596.49
+--- llama-server --list-devices stdout ---
+Available devices:
+  CUDA0: NVIDIA GeForce RTX 3060 (12287 MiB, 11250 MiB free)
+--- llama-server --list-devices stderr ---

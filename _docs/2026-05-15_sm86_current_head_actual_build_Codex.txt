@@ -1,0 +1,117 @@
+﻿cwd=C:\Users\downl\Desktop\llama.cpp-zapabob
+head=0f7cd1406
+timestamp=2026-05-15T14:29:12.8860462+09:00
+build_dir=H:\llama-cpp-zapabob-upstream-20260515-install-sccache
+build_stdout=H:\llama-cpp-zapabob-upstream-20260515-install-sccache\codex-install-build.stdout.log
+build_stderr=H:\llama-cpp-zapabob-upstream-20260515-install-sccache\codex-install-build.stderr.log
+targets=llama-server llama-cli llama-turboquant
+cuda_architectures=86
+--- selected build evidence ---
+[323/412] Building CXX object src\CMakeFiles\llama.dir\models\xverse.cpp.obj
+[324/412] Building CXX object common\CMakeFiles\llama-common.dir\arg.cpp.obj
+[325/412] Building CXX object common\CMakeFiles\llama-common.dir\chat-auto-parser-generator.cpp.obj
+[326/412] Building CXX object common\CMakeFiles\llama-common-base.dir\build-info.cpp.obj
+[327/412] Linking CXX shared library bin\llama.dll
+[328/412] Linking CXX static library common\llama-common-base.lib
+[329/412] Building CXX object common\CMakeFiles\llama-common.dir\chat-auto-parser-helpers.cpp.obj
+[330/412] Building CXX object common\CMakeFiles\llama-common.dir\chat-diff-analyzer.cpp.obj
+[331/412] Building CXX object common\CMakeFiles\llama-common.dir\chat-peg-parser.cpp.obj
+[332/412] Building CXX object common\CMakeFiles\llama-common.dir\chat.cpp.obj
+[333/412] Building CXX object common\CMakeFiles\llama-common.dir\console.cpp.obj
+[334/412] Building CXX object common\CMakeFiles\llama-common.dir\debug.cpp.obj
+[335/412] Building CXX object common\CMakeFiles\llama-common.dir\common.cpp.obj
+[336/412] Building CXX object common\CMakeFiles\llama-common.dir\fit.cpp.obj
+[337/412] Building CXX object common\CMakeFiles\llama-common.dir\json-partial.cpp.obj
+[338/412] Building CXX object common\CMakeFiles\llama-common.dir\json-schema-to-grammar.cpp.obj
+[339/412] Building CXX object common\CMakeFiles\llama-common.dir\llguidance.cpp.obj
+[340/412] Building CXX object common\CMakeFiles\llama-common.dir\download.cpp.obj
+[341/412] Building CXX object common\CMakeFiles\llama-common.dir\hf-cache.cpp.obj
+[342/412] Building CXX object common\CMakeFiles\llama-common.dir\ngram-cache.cpp.obj
+[343/412] Building CXX object common\CMakeFiles\llama-common.dir\ngram-map.cpp.obj
+[344/412] Building CXX object common\CMakeFiles\llama-common.dir\ngram-mod.cpp.obj
+[345/412] Building CXX object common\CMakeFiles\llama-common.dir\log.cpp.obj
+[346/412] Building CXX object common\CMakeFiles\llama-common.dir\preset.cpp.obj
+[347/412] Building CXX object common\CMakeFiles\llama-common.dir\peg-parser.cpp.obj
+[348/412] Building CXX object common\CMakeFiles\llama-common.dir\reasoning-budget.cpp.obj
+[349/412] Building CXX object common\CMakeFiles\llama-common.dir\regex-partial.cpp.obj
+[350/412] Building CXX object common\CMakeFiles\llama-common.dir\unicode.cpp.obj
+[351/412] Building CXX object common\CMakeFiles\llama-common.dir\sampling.cpp.obj
+[352/412] Building CXX object common\CMakeFiles\llama-common.dir\speculative.cpp.obj
+[353/412] Building CXX object common\CMakeFiles\llama-common.dir\jinja\lexer.cpp.obj
+[354/412] Building CXX object common\CMakeFiles\llama-common.dir\jinja\string.cpp.obj
+[355/412] Building CXX object common\CMakeFiles\llama-common.dir\jinja\parser.cpp.obj
+[356/412] Building CXX object common\CMakeFiles\llama-common.dir\jinja\runtime.cpp.obj
+[357/412] Building CXX object common\CMakeFiles\llama-common.dir\jinja\value.cpp.obj
+[358/412] Building CXX object common\CMakeFiles\llama-common.dir\__\license.cpp.obj
+[359/412] Building CXX object common\CMakeFiles\llama-common.dir\jinja\caps.cpp.obj
+[360/412] Building CXX object tools\server\CMakeFiles\server-context.dir\server-chat.cpp.obj
+[361/412] Building CXX object tools\cli\CMakeFiles\llama-cli.dir\cli.cpp.obj
+[362/412] Building CXX object vendor\cpp-httplib\CMakeFiles\cpp-httplib.dir\httplib.cpp.obj
+[363/412] Building CXX object tools\server\CMakeFiles\server-context.dir\server-task.cpp.obj
+[364/412] Building CXX object tools\server\CMakeFiles\server-context.dir\server-queue.cpp.obj
+[365/412] Linking CXX static library vendor\cpp-httplib\cpp-httplib.lib
+[366/412] Building CXX object tools\server\CMakeFiles\server-context.dir\server-common.cpp.obj
+[367/412] Building CXX object tools\server\CMakeFiles\server-context.dir\server-tools.cpp.obj
+[368/412] Building CXX object tools\server\CMakeFiles\server-context.dir\server-context.cpp.obj
+[369/412] Building CXX object tools\server\CMakeFiles\llama-server.dir\server.cpp.obj
+[370/412] Building CXX object tools\server\CMakeFiles\llama-server.dir\server-http.cpp.obj
+[371/412] Building CXX object tools\mtmd\CMakeFiles\mtmd.dir\mtmd.cpp.obj
+[372/412] Building CXX object tools\server\CMakeFiles\llama-server.dir\server-models.cpp.obj
+[373/412] Building CXX object tools\mtmd\CMakeFiles\mtmd.dir\mtmd-image.cpp.obj
+[374/412] Building CXX object tools\mtmd\CMakeFiles\mtmd.dir\mtmd-audio.cpp.obj
+[375/412] Building CXX object tools\mtmd\CMakeFiles\mtmd.dir\mtmd-helper.cpp.obj
+[376/412] Building CXX object tools\mtmd\CMakeFiles\mtmd.dir\models\cogvlm.cpp.obj
+[377/412] Building CXX object tools\mtmd\CMakeFiles\mtmd.dir\clip.cpp.obj
+[378/412] Building CXX object tools\mtmd\CMakeFiles\mtmd.dir\models\conformer.cpp.obj
+[379/412] Linking CXX shared library bin\llama-common.dll
+[380/412] Building CXX object tools\mtmd\CMakeFiles\mtmd.dir\models\dotsocr.cpp.obj
+[381/412] Building CXX object tools\mtmd\CMakeFiles\mtmd.dir\models\gemma4a.cpp.obj
+[382/412] Building CXX object tools\mtmd\CMakeFiles\mtmd.dir\models\gemma4v.cpp.obj
+[383/412] Building CXX object tools\mtmd\CMakeFiles\mtmd.dir\models\granite-speech.cpp.obj
+[384/412] Building CXX object tools\mtmd\CMakeFiles\mtmd.dir\models\glm4v.cpp.obj
+[385/412] Building CXX object tools\mtmd\CMakeFiles\mtmd.dir\models\hunyuanocr.cpp.obj
+[386/412] Building CXX object tools\mtmd\CMakeFiles\mtmd.dir\models\internvl.cpp.obj
+[387/412] Building CXX object tools\mtmd\CMakeFiles\mtmd.dir\models\kimivl.cpp.obj
+[388/412] Building CXX object tools\mtmd\CMakeFiles\mtmd.dir\models\kimik25.cpp.obj
+[389/412] Building CXX object tools\mtmd\CMakeFiles\mtmd.dir\models\nemotron-v2-vl.cpp.obj
+[390/412] Building CXX object tools\mtmd\CMakeFiles\mtmd.dir\models\llama4.cpp.obj
+[391/412] Building CXX object tools\mtmd\CMakeFiles\mtmd.dir\models\llava.cpp.obj
+[392/412] Building CXX object tools\mtmd\CMakeFiles\mtmd.dir\models\minicpmv.cpp.obj
+[393/412] Building CXX object tools\mtmd\CMakeFiles\mtmd.dir\models\paddleocr.cpp.obj
+[394/412] Building CXX object tools\mtmd\CMakeFiles\mtmd.dir\models\pixtral.cpp.obj
+[395/412] Building CXX object tools\mtmd\CMakeFiles\mtmd.dir\models\qwen2vl.cpp.obj
+[396/412] Building CXX object tools\mtmd\CMakeFiles\mtmd.dir\models\mimovl.cpp.obj
+[397/412] Building CXX object tools\mtmd\CMakeFiles\mtmd.dir\models\qwen3vl.cpp.obj
+[398/412] Building CXX object tools\mtmd\CMakeFiles\mtmd.dir\models\qwen3a.cpp.obj
+[399/412] Building CXX object tools\mtmd\CMakeFiles\mtmd.dir\models\step3vl.cpp.obj
+[400/412] Building CXX object tools\mtmd\CMakeFiles\mtmd.dir\models\whisper-enc.cpp.obj
+[401/412] Building CXX object tools\mtmd\CMakeFiles\mtmd.dir\models\siglip.cpp.obj
+[402/412] Building CXX object tools\mtmd\CMakeFiles\mtmd.dir\models\deepseekocr.cpp.obj
+[403/412] Building CXX object tools\mtmd\CMakeFiles\mtmd.dir\models\mobilenetv5.cpp.obj
+[404/412] Building CXX object tools\mtmd\CMakeFiles\mtmd.dir\models\youtuvl.cpp.obj
+[405/412] Building CXX object tools\mtmd\CMakeFiles\mtmd.dir\models\yasa2.cpp.obj
+[406/412] Building CXX object tools\turboquant\CMakeFiles\llama-turboquant.dir\turboquant.cpp.obj
+[407/412] Building CXX object tools\turboquant\CMakeFiles\llama-turboquant.dir\__\__\src\llama-turboquant.cpp.obj
+[408/412] Linking CXX executable bin\llama-turboquant.exe
+[409/412] Linking CXX shared library bin\mtmd.dll
+[410/412] Linking CXX static library tools\server\server-context.lib
+[411/412] Linking CXX executable bin\llama-cli.exe
+[412/412] Linking CXX executable bin\llama-server.exe
+--- artifact inventory ---
+
+Name                   Length LastWriteTime      
+----                   ------ -------------      
+ggml.dll                67072 2026/05/15 14:24:47
+ggml-base.dll          630784 2026/05/15 14:15:34
+ggml-cpu.dll           885248 2026/05/15 14:15:36
+ggml-cuda.dll        53883904 2026/05/15 14:24:45
+llama.dll             1973248 2026/05/15 14:25:00
+llama-cli.exe          729088 2026/05/15 14:25:14
+llama-common.dll      8995840 2026/05/15 14:25:09
+llama-server.exe      1759744 2026/05/15 14:25:14
+llama-turboquant.exe    88064 2026/05/15 14:25:13
+mtmd.dll               873984 2026/05/15 14:25:13
+--- no-op rebuild verification ---
+ninja: Entering directory `H:\llama-cpp-zapabob-upstream-20260515-install-sccache'
+ninja: no work to do.
+EXITCODE=0
