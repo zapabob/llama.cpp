@@ -23,11 +23,6 @@ export default defineConfig({
 		minify: true
 	},
 
-	esbuild: {
-		lineLimit: 500,
-		minifyIdentifiers: false
-	},
-
 	css: {
 		preprocessorOptions: {
 			scss: {
@@ -95,6 +90,8 @@ export default defineConfig({
 			'/v1': 'http://localhost:8080',
 			'/props': 'http://localhost:8080',
 			'/models': 'http://localhost:8080',
+			'/tools': 'http://localhost:8080',
+			'/slots': 'http://localhost:8080',
 			'/cors-proxy': 'http://localhost:8080'
 		},
 		headers: {
