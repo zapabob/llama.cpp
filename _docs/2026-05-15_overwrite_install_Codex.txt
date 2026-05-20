@@ -1,0 +1,35 @@
+﻿cwd=C:\Users\downl\Desktop\llama.cpp-zapabob
+head=0f7cd1406
+timestamp=2026-05-15T14:31:40.3385241+09:00
+build_bin=H:\llama-cpp-zapabob-upstream-20260515-install-sccache\bin
+install_bin=C:\Users\downl\AppData\Local\Programs\llama-turboquant\bin
+backup_root=C:\Users\downl\AppData\Local\Programs\llama-turboquant\backup-codex-20260515-1425
+files=ggml.dll, ggml-base.dll, ggml-cpu.dll, ggml-cuda.dll, llama.dll, llama-common.dll, mtmd.dll, llama-server.exe, llama-cli.exe, llama-turboquant.exe
+--- backup of overwritten files ---
+
+Phase  Name                   Length LastWriteTime       FullName                                                                                              
+-----  ----                   ------ -------------       --------                                                                                              
+backup ggml.dll                68096 2026/04/22 17:15:59 C:\Users\downl\AppData\Local\Programs\llama-turboquant\backup-codex-20260515-1425\ggml.dll            
+backup ggml-base.dll          641536 2026/04/22 16:11:44 C:\Users\downl\AppData\Local\Programs\llama-turboquant\backup-codex-20260515-1425\ggml-base.dll       
+backup ggml-cpu.dll           900096 2026/04/22 16:11:52 C:\Users\downl\AppData\Local\Programs\llama-turboquant\backup-codex-20260515-1425\ggml-cpu.dll        
+backup ggml-cuda.dll        56089088 2026/04/22 17:15:57 C:\Users\downl\AppData\Local\Programs\llama-turboquant\backup-codex-20260515-1425\ggml-cuda.dll       
+backup llama.dll             2025984 2026/04/22 17:16:39 C:\Users\downl\AppData\Local\Programs\llama-turboquant\backup-codex-20260515-1425\llama.dll           
+backup llama-common.dll      8894976 2026/04/22 17:17:32 C:\Users\downl\AppData\Local\Programs\llama-turboquant\backup-codex-20260515-1425\llama-common.dll    
+backup mtmd.dll               802304 2026/04/22 17:17:45 C:\Users\downl\AppData\Local\Programs\llama-turboquant\backup-codex-20260515-1425\mtmd.dll            
+backup llama-server.exe      8704512 2026/04/22 17:18:28 C:\Users\downl\AppData\Local\Programs\llama-turboquant\backup-codex-20260515-1425\llama-server.exe    
+backup llama-cli.exe          728576 2026/04/22 11:16:19 C:\Users\downl\AppData\Local\Programs\llama-turboquant\backup-codex-20260515-1425\llama-cli.exe       
+backup llama-turboquant.exe    42496 2026/03/30 18:29:32 C:\Users\downl\AppData\Local\Programs\llama-turboquant\backup-codex-20260515-1425\llama-turboquant.exe
+--- installed files after overwrite ---
+
+Phase     Name                   Length LastWriteTime       FullName                                                                       
+-----     ----                   ------ -------------       --------                                                                       
+installed ggml.dll                67072 2026/05/15 14:24:47 C:\Users\downl\AppData\Local\Programs\llama-turboquant\bin\ggml.dll            
+installed ggml-base.dll          630784 2026/05/15 14:15:34 C:\Users\downl\AppData\Local\Programs\llama-turboquant\bin\ggml-base.dll       
+installed ggml-cpu.dll           885248 2026/05/15 14:15:36 C:\Users\downl\AppData\Local\Programs\llama-turboquant\bin\ggml-cpu.dll        
+installed ggml-cuda.dll        53883904 2026/05/15 14:24:45 C:\Users\downl\AppData\Local\Programs\llama-turboquant\bin\ggml-cuda.dll       
+installed llama.dll             1973248 2026/05/15 14:25:00 C:\Users\downl\AppData\Local\Programs\llama-turboquant\bin\llama.dll           
+installed llama-common.dll      8995840 2026/05/15 14:25:09 C:\Users\downl\AppData\Local\Programs\llama-turboquant\bin\llama-common.dll    
+installed mtmd.dll               873984 2026/05/15 14:25:13 C:\Users\downl\AppData\Local\Programs\llama-turboquant\bin\mtmd.dll            
+installed llama-server.exe      1759744 2026/05/15 14:25:14 C:\Users\downl\AppData\Local\Programs\llama-turboquant\bin\llama-server.exe    
+installed llama-cli.exe          729088 2026/05/15 14:25:14 C:\Users\downl\AppData\Local\Programs\llama-turboquant\bin\llama-cli.exe       
+installed llama-turboquant.exe    88064 2026/05/15 14:25:13 C:\Users\downl\AppData\Local\Programs\llama-turboquant\bin\llama-turboquant.exe

@@ -32,6 +32,7 @@ SECURITY_REFERENCE_URL = "https://github.com/ggml-org/llama.cpp/security"
 # Paths that must exist and retain TurboQuant / Triality integration markers.
 PROTECTED_PATHS = (
     "convert_hf_to_gguf.py",
+    "conversion/base.py",
     "src/llama-turboquant.cpp",
     "src/llama-turboquant.h",
     "src/llama-kv-cache.cpp",
@@ -41,6 +42,7 @@ PROTECTED_PATHS = (
 MERGE_POLICY = {
     "protected": {
         "convert_hf_to_gguf.py": "Keep Hypura GGUF TurboQuant metadata embedding and default knobs.",
+        "conversion/base.py": "Keep Hypura GGUF TurboQuant and ELT metadata embedding on the official converter API.",
         "src/llama-turboquant.cpp": "Keep Triality/SO8 runtime helpers unless upstream fully supersedes them.",
         "src/llama-turboquant.h": "Keep Triality/SO8 runtime interface unless upstream fully supersedes it.",
         "src/llama-kv-cache.cpp": "Keep KV-cache TurboQuant hooks and env bridge integration.",
@@ -60,6 +62,7 @@ MERGE_POLICY = {
     },
     "reinject_benefits": {
         "convert_hf_to_gguf.py": "Re-apply Hypura GGUF metadata defaults after upstream converter changes.",
+        "conversion/base.py": "Re-apply Hypura GGUF metadata injection after upstream converter API changes.",
         "src/llama-graph.cpp": "Re-apply TurboQuant runtime hooks on top of upstream graph updates.",
         "src/llama-kv-cache.cpp": "Re-apply KV-cache Triality/SO8 behavior on top of upstream bugfixes.",
         "src/llama-kv-cache.h": "Re-apply KV-cache interface benefits on top of upstream API changes.",
@@ -71,7 +74,7 @@ MERGE_POLICY = {
 }
 
 PROTECTED_SUBSTRINGS = (
-    ("convert_hf_to_gguf.py", "hypura.turboquant"),
+    ("conversion/base.py", "hypura.turboquant"),
     ("src/llama-kv-cache.h", "llama-turboquant.h"),
     ("src/llama-model-loader.cpp", 'name.rfind("tq.", 0) == 0'),
 )

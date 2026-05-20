@@ -24,6 +24,7 @@ llama_memory_hybrid::llama_memory_hybrid(
                  uint32_t   rs_size,
                             /* common */
                  uint32_t   n_seq_max,
+                 uint32_t   n_rs_seq,
                      bool   offload,
                      bool   unified,
                             /* layer filters */
@@ -54,6 +55,7 @@ llama_memory_hybrid::llama_memory_hybrid(
         offload,
         rs_size,
         n_seq_max,
+        n_rs_seq,
         filter_recr == nullptr ?
             [&](int32_t il) { return hparams.is_recurrent(il); }
             : filter_recr
@@ -261,6 +263,18 @@ const llama_ubatch & llama_memory_hybrid_context::get_ubatch() const {
 
 const llama_kv_cache_context * llama_memory_hybrid_context::get_attn() const {
     return static_cast<const llama_kv_cache_context *>(ctx_attn.get());
+}
+
+ggml_tensor * llama_memory_hybrid_context::get_turbo_rot_forward() const {
+    return ctx_attn ? ctx_attn->get_turbo_rot_forward() : nullptr;
+}
+
+ggml_tensor * llama_memory_hybrid_context::get_turbo_rot_inverse() const {
+    return ctx_attn ? ctx_attn->get_turbo_rot_inverse() : nullptr;
+}
+
+ggml_tensor * llama_memory_hybrid_context::get_turbo_innerq_scale_inv() const {
+    return ctx_attn ? ctx_attn->get_turbo_innerq_scale_inv() : nullptr;
 }
 
 const llama_memory_recurrent_context * llama_memory_hybrid_context::get_recr() const {
