@@ -6,7 +6,7 @@ Changed TurboQuant attention rotation from default-off to default-on for support
 
 ## Background / requirements
 
-- User request: "デフォルト オン".
+- User request: "default on".
 - Prior state: `llama_kv_cache` initialized `attn_rot_k` and `attn_rot_v` to `false`, then allowed `LLAMA_ATTN_ROT_K_OVERRIDE=1` and `LLAMA_ATTN_ROT_V_OVERRIDE=1` to enable supported sides.
 - Required behavior: default to enabled when the selected K/V cache type is quantized and the head dimension satisfies the existing rotation guard.
 
@@ -39,6 +39,16 @@ Changed TurboQuant attention rotation from default-off to default-on for support
   - `cmake -S . -B H:\llama-cpp-zapabob-thetom-20260517-sm86 -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=86 -DLLAMA_CURL=OFF -DLLAMA_TURBOQUANT=ON`
   - `ninja -C H:\llama-cpp-zapabob-thetom-20260517-sm86 llama-server llama-cli llama-turboquant`
   - Result: passed with existing CUDA template unused-variable warnings only.
+- Local overwrite install:
+  - Source: `H:\llama-cpp-zapabob-thetom-20260517-sm86\bin`
+  - Destination: `C:\Users\downl\AppData\Local\Programs\llama-turboquant\bin`
+  - Backup: `C:\Users\downl\AppData\Local\Programs\llama-turboquant\bin-backup-codex-20260521-032714`
+  - Updated files: `ggml.dll`, `ggml-base.dll`, `ggml-cpu.dll`, `ggml-cuda.dll`, `llama.dll`, `llama-common.dll`, `mtmd.dll`, `llama-server.exe`, `llama-cli.exe`, `llama-turboquant.exe`
+- Installed runtime checks:
+  - `C:\Users\downl\AppData\Local\Programs\llama-turboquant\bin\llama-server.exe --version`: `version: 9462 (5a824f830)`.
+  - `llama-server --version`: `version: 9462 (5a824f830)`.
+  - `llama-server --list-devices`: `CUDA0: NVIDIA GeForce RTX 3060`.
+  - `llama-server --help`: cache types include `turbo2`, `turbo3`, and `turbo4` for K/V and draft K/V.
 
 ## Residual risks
 
