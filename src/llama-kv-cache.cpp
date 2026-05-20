@@ -463,11 +463,12 @@ llama_kv_cache::llama_kv_cache(
                 ggml_type_name(type_v), (float)memory_size_v / (1024.0f * 1024.0f));
     }
 
-    // TurboQuant: master's #21038 attention rotation is OFF by default on this
-    // fork. Enable per-side via LLAMA_ATTN_ROT_K_OVERRIDE=1 and/or
-    // LLAMA_ATTN_ROT_V_OVERRIDE=1 if your specific model+KV combo benefits.
+    // TurboQuant: master's #21038 attention rotation is ON by default on this
+    // fork when the selected K/V cache type and head-dim alignment support it.
+    // Use LLAMA_ATTN_ROT_K_OVERRIDE=0 and/or LLAMA_ATTN_ROT_V_OVERRIDE=0 to
+    // disable one side for a specific model+KV combo.
     //
-    // Why default OFF: empirical PPL+KLD testing on 7 model families
+    // Compatibility note: empirical PPL+KLD testing on 7 model families
     // (gemma-4 26B-A4B/31B/E2B, Qwen2.5-7B, Qwen3.5-2B, Mistral-Small-24B,
     // phi-4, on q8/turbo4 KV) showed the optimal rotation policy is highly
     // model-and-quant specific:
@@ -478,46 +479,44 @@ llama_kv_cache::llama_kv_cache(
     //   • phi-4 Q8 q8/turbo4: V-side rotation crashes (graph hash overflow).
     //   • Qwen2.5/3.5/Mistral: rotation effect is within standard error.
     //
-    // No single default is correct everywhere, including within the same
+    // No single default is perfect everywhere, including within the same
     // architecture family (gemma-4 above shows three distinct optima across
-    // three sizes). Per-arch heuristics in code would silently regress users
-    // on variants we haven't tested. Default OFF + per-side env knobs lets
-    // each user tune for their specific config; documented findings in the
-    // README guide the choice.
+    // three sizes). The default is now ON per user policy; per-side env knobs
+    // remain available for configs that need to opt out.
     //
     // Reported by @erazortt (TheTom/turboquant_plus#88).
     //
-    // LLAMA_ATTN_ROT_DISABLE retained as a no-op alias (default OFF makes it
-    // redundant but historical scripts may set it).
-    // Default attn_rot_disable=false now that rotation is OFF by default. The
-    // env var is preserved as a hard lock-out (=1 forces rotation off and
-    // blocks overrides), useful for users who want to guarantee no rotation
-    // regardless of any LLAMA_ATTN_ROT_*_OVERRIDE settings.
+    // LLAMA_ATTN_ROT_DISABLE remains a hard lock-out (=1 forces rotation off
+    // and blocks per-side overrides), useful for users who want to guarantee
+    // no rotation regardless of any LLAMA_ATTN_ROT_*_OVERRIDE settings.
     const char * LLAMA_ATTN_ROT_DISABLE = getenv("LLAMA_ATTN_ROT_DISABLE");
     const bool attn_rot_disable = LLAMA_ATTN_ROT_DISABLE ? (atoi(LLAMA_ATTN_ROT_DISABLE) != 0) : false;
 
-    // Default: rotation OFF on both sides (safe across all tested model families).
-    // Override per side via env vars below.
-    attn_rot_k = false;
-    attn_rot_v = false;
+    const bool attn_rot_k_supported =
+        n_embd_head_k_all > 0 &&
+        ggml_is_quantized(type_k) &&
+        hparams.n_embd_head_k() % 64 == 0;
+    const bool attn_rot_v_supported =
+        n_embd_head_v_all > 0 &&
+        ggml_is_quantized(type_v) &&
+        hparams.n_embd_head_v() % 64 == 0;
 
-    // Per-side overrides. Set LLAMA_ATTN_ROT_K_OVERRIDE=1 / LLAMA_ATTN_ROT_V_OVERRIDE=1
-    // to enable rotation. The cache type and head-dim alignment guards below
-    // still apply: rotation only takes effect on quantized types with
-    // head_dim % 64 == 0 (master's #21038 requirements).
+    // Default: rotation ON on supported K/V cache sides.
+    // Override per side via env vars below.
+    attn_rot_k = !attn_rot_disable && attn_rot_k_supported;
+    attn_rot_v = !attn_rot_disable && attn_rot_v_supported;
+
+    // Per-side overrides. Set LLAMA_ATTN_ROT_K_OVERRIDE=0 / LLAMA_ATTN_ROT_V_OVERRIDE=0
+    // to disable rotation, or =1 to force the supported default back on. The
+    // cache type and head-dim alignment guards still apply: rotation only takes
+    // effect on quantized types with head_dim % 64 == 0 (master's #21038 requirements).
     const char * ROT_K_OV = getenv("LLAMA_ATTN_ROT_K_OVERRIDE");
-    if (ROT_K_OV && atoi(ROT_K_OV) != 0 && !attn_rot_disable) {
-        attn_rot_k =
-            n_embd_head_k_all > 0 &&
-            ggml_is_quantized(type_k) &&
-            hparams.n_embd_head_k() % 64 == 0;
+    if (ROT_K_OV && !attn_rot_disable) {
+        attn_rot_k = (atoi(ROT_K_OV) != 0) && attn_rot_k_supported;
     }
     const char * ROT_V_OV = getenv("LLAMA_ATTN_ROT_V_OVERRIDE");
-    if (ROT_V_OV && atoi(ROT_V_OV) != 0 && !attn_rot_disable) {
-        attn_rot_v =
-            n_embd_head_v_all > 0 &&
-            ggml_is_quantized(type_v) &&
-            hparams.n_embd_head_v() % 64 == 0;
+    if (ROT_V_OV && !attn_rot_disable) {
+        attn_rot_v = (atoi(ROT_V_OV) != 0) && attn_rot_v_supported;
     }
 
     LLAMA_LOG_INFO("%s: attn_rot_k = %d, n_embd_head_k_all = %d\n", __func__, attn_rot_k, n_embd_head_k_all);
