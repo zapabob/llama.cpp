@@ -12,6 +12,7 @@
 #include <random>
 #include <sstream>
 #include <fstream>
+#include <limits>
 
 json format_error_response(const std::string & message, const enum error_type type) {
     std::string type_str;
@@ -344,6 +345,14 @@ const mtmd::input_chunk_ptr & server_tokens::find_chunk(size_t idx) const {
     throw std::runtime_error("Chunk not found");
 }
 
+std::pair<const mtmd::input_chunk_ptr *, size_t> server_tokens::find_next_media_chunk(size_t idx) const {
+    auto it = map_idx_to_media.upper_bound(idx);
+    if (it != map_idx_to_media.end()) {
+        return { &it->second, it->first };
+    }
+    return { nullptr, 0 };
+}
+
 void server_tokens::push_back(llama_token tok) {
     if (tok == LLAMA_TOKEN_NULL) {
         throw std::runtime_error("Invalid token");
@@ -531,37 +540,6 @@ bool server_tokens::validate(const struct llama_context * ctx) const {
     return true;
 }
 
-int32_t server_tokens::process_chunk(
-            llama_context * ctx,
-            mtmd_context * mctx,
-            size_t idx,
-            llama_pos pos,
-            int32_t seq_id,
-            size_t & n_tokens_out) const {
-    const auto & chunk = find_chunk(idx);
-    const char * name = mtmd_input_chunk_get_type(chunk.get()) == MTMD_INPUT_CHUNK_TYPE_IMAGE
-                        ? "image" : "audio";
-    SRV_INF("processing %s...\n", name);
-    int32_t n_batch = llama_n_batch(ctx);
-    int64_t t0 = ggml_time_ms();
-    llama_pos new_n_past; // unused for now
-    int32_t result = mtmd_helper_eval_chunk_single(mctx, ctx,
-        chunk.get(),
-        pos,
-        seq_id,
-        n_batch,
-        true, // logits last
-        &new_n_past);
-    SRV_INF("%s processed in %" PRId64 " ms\n", name, ggml_time_ms() - t0);
-    if (result != 0) {
-        LOG_ERR("mtmd_helper_eval failed with status %d", result);
-        n_tokens_out = 0;
-        return result;
-    }
-    n_tokens_out = mtmd_input_chunk_get_n_tokens(chunk.get());
-    return 0;
-}
-
 server_tokens server_tokens::clone() const {
     server_tokens res;
     res.has_mtmd = has_mtmd;
@@ -701,29 +679,19 @@ size_t validate_utf8(const std::string& text) {
     return len;
 }
 
-// Computes FNV-1a hash of the data
-static std::string fnv_hash(const uint8_t * data, size_t len) {
-    const uint64_t fnv_prime = 0x100000001b3ULL;
-    uint64_t hash = 0xcbf29ce484222325ULL;
-
-    for (size_t i = 0; i < len; ++i) {
-        hash ^= data[i];
-        hash *= fnv_prime;
-    }
-    return std::to_string(hash);
-}
-
-server_tokens process_mtmd_prompt(mtmd_context * mctx, std::string prompt, std::vector<raw_buffer> files) {
+server_tokens process_mtmd_prompt(mtmd_context * mctx, const std::string & prompt, const std::vector<raw_buffer> & files, bool is_placeholder) {
+    // these will be freed upon going out of scope
     mtmd::bitmaps bitmaps;
+    std::vector<mtmd_helper::video_ptr> videos;
     for (auto & file : files) {
-        mtmd::bitmap bmp(mtmd_helper_bitmap_init_from_buf(mctx, file.data(), file.size()));
-        if (!bmp.ptr) {
+        auto out = mtmd_helper_bitmap_init_from_buf(mctx, file.data(), file.size(), is_placeholder);
+        if (!out.bitmap) {
             throw std::runtime_error("Failed to load image or audio file");
         }
-        // calculate bitmap hash (for KV caching)
-        std::string hash = fnv_hash(bmp.data(), bmp.n_bytes());
-        bmp.set_id(hash.c_str());
-        bitmaps.entries.push_back(std::move(bmp));
+        bitmaps.entries.emplace_back(out.bitmap);
+        if (out.video_ctx) {
+            videos.emplace_back(out.video_ctx);
+        }
     }
     // process prompt
     std::vector<server_tokens> inputs;
@@ -1023,6 +991,20 @@ json oaicompat_chat_params_parse(
                 p["text"] = get_media_marker();
                 p.erase("input_audio");
 
+            } else if (type == "input_video") {
+                if (!opt.allow_video) {
+                    throw std::runtime_error("video input is not supported - hint: if this is unexpected, you may need to provide the mmproj");
+                }
+
+                json input_video  = json_value(p, "input_video", json::object());
+                std::string data  = json_value(input_video, "data", std::string());
+                auto decoded_data = base64_decode(data); // expected to be base64 encoded
+                out_files.push_back(decoded_data);
+
+                p["type"] = "media_marker";
+                p["text"] = get_media_marker();
+                p.erase("input_video");
+
             } else if (type != "text") {
                 throw std::invalid_argument("unsupported content[].type");
             }
@@ -1032,23 +1014,33 @@ json oaicompat_chat_params_parse(
     auto caps = common_chat_templates_get_caps(opt.tmpls.get());
 
     common_chat_templates_inputs inputs;
-    inputs.messages              = common_chat_msgs_parse_oaicompat(messages);
-    inputs.tools                 = common_chat_tools_parse_oaicompat(tools);
-    inputs.tool_choice           = common_chat_tool_choice_parse_oaicompat(tool_choice);
-    inputs.json_schema           = json_schema.is_null() ? "" : json_schema.dump();
-    inputs.grammar               = grammar;
-    inputs.use_jinja             = opt.use_jinja;
-    inputs.parallel_tool_calls   = json_value(body, "parallel_tool_calls", caps["supports_parallel_tool_calls"]);
-    inputs.add_generation_prompt = json_value(body, "add_generation_prompt", true);
-    const bool continue_final_message = json_value(body, "continue_final_message", false);
-    if (continue_final_message && inputs.add_generation_prompt) {
+    inputs.messages               = common_chat_msgs_parse_oaicompat(messages);
+    inputs.tools                  = common_chat_tools_parse_oaicompat(tools);
+    inputs.tool_choice            = common_chat_tool_choice_parse_oaicompat(tool_choice);
+    inputs.json_schema            = json_schema.is_null() ? "" : json_schema.dump();
+    inputs.grammar                = grammar;
+    inputs.use_jinja              = opt.use_jinja;
+    inputs.parallel_tool_calls    = json_value(body, "parallel_tool_calls", caps["supports_parallel_tool_calls"]);
+    inputs.add_generation_prompt  = json_value(body, "add_generation_prompt", true);
+    inputs.continue_final_message = body.contains("continue_final_message") ?
+        common_chat_continuation_parse(body.at("continue_final_message")) :
+        COMMON_CHAT_CONTINUATION_NONE;
+    if (inputs.continue_final_message == COMMON_CHAT_CONTINUATION_NONE && opt.prefill_assistant
+        && !inputs.messages.empty() && inputs.messages.back().role == "assistant") {
+        if (inputs.messages.size() >= 2 && inputs.messages[inputs.messages.size() - 2].role == "assistant") {
+            throw std::invalid_argument("Cannot have 2 or more assistant messages at the end of the list.");
+        }
+        inputs.continue_final_message = COMMON_CHAT_CONTINUATION_AUTO;
+        inputs.add_generation_prompt  = false;
+    }
+    if (inputs.continue_final_message != COMMON_CHAT_CONTINUATION_NONE && inputs.add_generation_prompt) {
         throw std::invalid_argument("Cannot set both add_generation_prompt and continue_final_message to true.");
     }
-    inputs.reasoning_format      = opt.reasoning_format;
+    inputs.reasoning_format = opt.reasoning_format;
     if (body.contains("reasoning_format")) {
         inputs.reasoning_format = common_reasoning_format_from_name(body.at("reasoning_format").get<std::string>());
     }
-    inputs.enable_thinking       = opt.enable_thinking;
+    inputs.enable_thinking = opt.enable_thinking;
     if (!inputs.tools.empty() && inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE) {
         if (body.contains("grammar")) {
             throw std::invalid_argument("Cannot use custom grammar constraints with tools.");
@@ -1073,83 +1065,10 @@ json oaicompat_chat_params_parse(
         throw std::invalid_argument("invalid type for \"enable_thinking\" (expected boolean, got string)");
     }
 
-    // if the assistant message appears at the end of list, we do not add end-of-turn token
-    // for ex. this can be useful to modify the reasoning process in reasoning models
-    // continue_final_message is the explicit opt in alias from the vLLM/transformers API,
-    // equivalent to the prefill_assistant heuristic
-    bool prefill_assistant_message = !inputs.messages.empty() && inputs.messages.back().role == "assistant"
-        && (continue_final_message || opt.prefill_assistant);
-    common_chat_msg last_message;
-    if (prefill_assistant_message) {
-        last_message = inputs.messages.back();
-        inputs.messages.pop_back();
-
-        /* sanity check, max one assistant message at the end of the list */
-        if (!inputs.messages.empty() && inputs.messages.back().role == "assistant"){
-            throw std::invalid_argument("Cannot have 2 or more assistant messages at the end of the list.");
-        }
-
-        // reject reasoning prefill on channel based templates that do not expose explicit thinking tags
-        if (!last_message.reasoning_content.empty() && inputs.enable_thinking) {
-            auto probe_params = common_chat_templates_apply(opt.tmpls.get(), inputs);
-            if (probe_params.supports_thinking && probe_params.thinking_end_tag.empty()) {
-                throw std::invalid_argument("Assistant prefill with reasoning_content is not supported yet for this template.");
-            }
-        }
-
-        inputs.add_generation_prompt = true;
-    }
     inputs.force_pure_content = opt.force_pure_content;
 
     // Apply chat template to the list of messages
     auto chat_params = common_chat_templates_apply(opt.tmpls.get(), inputs);
-
-    /* Append assistant prefilled message */
-    if (prefill_assistant_message) {
-        const bool thinking_active = chat_params.supports_thinking && !chat_params.thinking_end_tag.empty();
-        const bool has_reasoning   = !last_message.reasoning_content.empty();
-        const bool has_content     = !last_message.content.empty() || !last_message.content_parts.empty();
-        const bool mid_reasoning   = has_reasoning && !has_content;
-
-        // some templates inject thinking_start in generation_prompt, others let the model emit it
-        const bool gp_has_think = thinking_active
-            && chat_params.generation_prompt.find(chat_params.thinking_start_tag) != std::string::npos;
-
-        // open the thinking block when reasoning is present and the template did not inject it
-        if (has_reasoning) {
-            if (thinking_active && !gp_has_think) {
-                chat_params.prompt += chat_params.thinking_start_tag;
-            }
-            chat_params.prompt += last_message.reasoning_content;
-        }
-
-        if (thinking_active) {
-            if (mid_reasoning) {
-                // model continues inside the thinking block, keep generation_prompt open on think
-                if (!gp_has_think) {
-                    chat_params.generation_prompt += chat_params.thinking_start_tag;
-                }
-            } else {
-                // close thinking block when reasoning is followed by content, or when the template forced it open
-                if (has_reasoning || gp_has_think) {
-                    chat_params.prompt += chat_params.thinking_end_tag;
-                }
-                // strip thinking_start from generation_prompt so the parser routes model output as content
-                auto pos = chat_params.generation_prompt.rfind(chat_params.thinking_start_tag);
-                if (pos != std::string::npos) {
-                    chat_params.generation_prompt = chat_params.generation_prompt.substr(0, pos);
-                }
-            }
-        }
-
-        if (!last_message.content_parts.empty()) {
-            for (auto & p : last_message.content_parts) {
-                chat_params.prompt += p.text;
-            }
-        } else {
-            chat_params.prompt += last_message.content;
-        }
-    }
 
     llama_params["chat_format"] = static_cast<int>(chat_params.format);
     llama_params["prompt"]      = chat_params.prompt;
@@ -1173,11 +1092,21 @@ json oaicompat_chat_params_parse(
         llama_params["chat_parser"] = chat_params.parser;
     }
 
+    llama_params["message_spans"] = json::array();
+
+    for (const auto & span : chat_params.message_spans) {
+        llama_params["message_spans"].push_back({
+            { "role", span.role },
+            { "pos",  span.pos  },
+            { "len",  span.len  },
+        });
+    }
+
     // Reasoning budget: pass parameters through to sampling layer
     {
-        int reasoning_budget = opt.reasoning_budget;
-        if (reasoning_budget == -1 && body.contains("thinking_budget_tokens")) {
-            reasoning_budget = json_value(body, "thinking_budget_tokens", -1);
+        int reasoning_budget = json_value(body, "thinking_budget_tokens", -1);
+        if (reasoning_budget == -1) {
+            reasoning_budget = opt.reasoning_budget;
         }
 
         if (!chat_params.thinking_end_tag.empty()) {
@@ -1185,6 +1114,7 @@ json oaicompat_chat_params_parse(
             llama_params["reasoning_budget_start_tag"] = chat_params.thinking_start_tag;
             llama_params["reasoning_budget_end_tag"] = chat_params.thinking_end_tag;
             llama_params["reasoning_budget_message"] = opt.reasoning_budget_message;
+            llama_params["reasoning_control"] = json_value(body, "reasoning_control", false);
         }
     }
 
@@ -1309,7 +1239,7 @@ json format_response_rerank(
 // other utils
 //
 
-std::vector<llama_token_data> get_token_probabilities(llama_context * ctx, int idx) {
+std::vector<llama_token_data> get_token_probabilities(llama_context * ctx, int idx, size_t n_top) {
     std::vector<llama_token_data> cur;
 
     const auto * logits = llama_get_logits_ith(ctx, idx);
@@ -1328,21 +1258,34 @@ std::vector<llama_token_data> get_token_probabilities(llama_context * ctx, int i
         }
     }
 
-    // sort tokens by logits
-    std::sort(cur.begin(), cur.end(), [](const llama_token_data & a, const llama_token_data & b) {
-        return a.logit > b.logit;
-    });
+    // sort tokens by logits (partial: only the leading `n_top` need ordering)
+    if (n_top > cur.size()) {
+        n_top = cur.size();
+    }
+    if (n_top > 0) {
+        std::partial_sort(cur.begin(), cur.begin() + n_top, cur.end(),
+            [](const llama_token_data & a, const llama_token_data & b) {
+                return a.logit > b.logit;
+            });
+    }
 
     // apply softmax
-    float max_l = cur[0].logit;
+    float max_l = -std::numeric_limits<float>::infinity();
+    if (n_top > 0) {
+        max_l = cur[0].logit; // partial_sort guarantees the absolute maximum is at index 0
+    } else {
+        for (const auto & t : cur) {
+            max_l = std::max(max_l, t.logit);
+        }
+    }
     float cum_sum = 0.0f;
-    for (size_t i = 0; i < cur.size(); ++i) {
-        float p = expf(cur[i].logit - max_l);
-        cur[i].p = p;
+    for (auto & t : cur) {
+        float p = expf(t.logit - max_l);
+        t.p = p;
         cum_sum += p;
     }
-    for (size_t i = 0; i < cur.size(); ++i) {
-        cur[i].p /= cum_sum;
+    for (auto & t : cur) {
+        t.p /= cum_sum;
     }
 
     return cur;
