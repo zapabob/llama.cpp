@@ -12,6 +12,29 @@
 
 LLM inference in C/C++
 
+## zapabob fork: SO8TriarityTurboQuant in 30 seconds
+
+This fork is a research-grade `llama.cpp` branch for testing whether long-context KV cache memory can be cut on consumer NVIDIA GPUs without treating quantization as a reconstruction-only problem. The custom path combines TurboQuant KV-cache compression with an SO(8) Triality-inspired K-side protection layer, exposed as `key_only_block_so8_triality_vector`, while preserving current upstream `llama.cpp` server/API behavior.
+
+For a recruiter or engineering reviewer: the interesting work is not another low-bit quantizer, but the validation loop around it. K is protected through the SO(8) vector view, V is compressed with the smallest passing TurboQuant tier, and the result is selected by ablation statistics rather than by visual inspection or a single happy-path prompt.
+
+![K-side SO8 Triality orthogonality error with error bars](docs/research/so8-triarity-turboquant/plots/k_triality_orthogonality_error.png)
+
+![V-side TurboQuant quality versus memory with error bars](docs/research/so8-triarity-turboquant/plots/v_turboquant_quality_vs_memory.png)
+
+### Ablation result
+
+The current operating profile is `triality_vector_v_turbo3`: public K cache type `triality-vector`, llama.cpp K entry point `q8_0`, public V cache type `turbo3`, and `TURBO_LAYER_ADAPTIVE=7`. On the synthetic ablation set, 3-bit protected V was the smallest tier that passed the hidden-state quality threshold: hidden cosine similarity mean `0.988765` with 95% CI `[0.988445, 0.989086]`, attention-output relative error mean `0.149698` with 95% CI `[0.147634, 0.151763]`, and exact-KV memory ratio `0.178223`.
+
+| Question | Result |
+|---|---|
+| Why not 2-bit V? | Lower memory ratio (`0.148926`) but hidden cosine mean only `0.961259`, below the production selection threshold used for this run. |
+| Why not 4-bit V? | Better hidden cosine mean (`0.996829`) and lower attention error (`0.079607`), but larger memory ratio (`0.207520`) than the selected 3-bit tier. |
+| Does SO8 K protection stay numerically controlled? | The vector K audit passed at the selected tier: mean effective orthogonality error `0.003113`, max effective orthogonality error `0.004870`, and mean determinant error `0.001814`. |
+| How was significance checked? | Paired Wilcoxon signed-rank tests over `n=9` trials with Holm correction. At 3-bit V, candidate-minus-protected deltas showed SO8-MSE block V was worse on attention error by `+0.034621` absolute relative-error units (`p_holm=0.01953125`), and product-based SO8 V was worse by `+0.271150` (`p_holm=0.01953125`). |
+
+Reproduction artifacts live under [`docs/research/so8-triarity-turboquant/metrics`](docs/research/so8-triarity-turboquant/metrics). This fork intentionally keeps exact-score evaluation, estimated-score evaluation, reconstruction metrics, and attention/logit-facing metrics separate so that future upstream merges do not collapse the method into a plain MSE quantizer.
+
 ## Recent API changes
 
 - [Changelog for `libllama` API](https://github.com/ggml-org/llama.cpp/issues/9289)
@@ -33,9 +56,7 @@ LLM inference in C/C++
 
 ----
 
-## zapabob fork: Related Repositories / 関連リポジトリ
-
-This fork keeps local integration points for Triality SO(8), TurboQuant, and downstream GGUF runtime consumers while targeting local VRAM reduction on consumer GPUs (RTX 3060+).
+## zapabob fork: related repositories
 
 | Repository | Role |
 |---|---|
