@@ -63,10 +63,13 @@ static const llm_fused_op_probe llm_fused_op_lid_probe = {
 
 llama_context::llama_context(
         const llama_model & model,
-              llama_context_params params) :
+              llama_context_params params,
+        const llama_tq_context_config * turboquant_config,
+              llama_tq_error * turboquant_error) :
     model(model),
     cvec(std::make_unique<llama_adapter_cvec>()),
     loras(std::make_unique<llama_adapter_loras>()),
+    turboquant_state(model.hparams.n_layer()),
     balloc(std::make_unique<llama_batch_allocr>(model.hparams.n_pos_per_embd())) {
     // TODO warning when creating llama_context with awkward ctx size that is not a power of 2,
     //     may need to be backend-dependent
@@ -76,6 +79,13 @@ llama_context::llama_context(
     t_load_us  = model.t_load_us;
 
     const auto & hparams = model.hparams;
+
+    if (turboquant_config != nullptr) {
+        if (!turboquant_state.configure(*turboquant_config, true, turboquant_error)) {
+            throw std::runtime_error(turboquant_error ? turboquant_error->message : "invalid TurboQuant context configuration");
+        }
+        turboquant_telemetry.set_trace_enabled(turboquant_config->trace_enabled);
+    }
 
     cparams.n_seq_max = std::max(1u, params.n_seq_max);
     if (cparams.n_seq_max > LLAMA_MAX_SEQ) {
@@ -703,6 +713,35 @@ const llama_model & llama_context::get_model() const {
 
 const llama_cparams & llama_context::get_cparams() const {
     return cparams;
+}
+
+bool llama_context::turboquant_configure(const llama_tq_context_config & cfg, llama_tq_error * err) {
+    if (!turboquant_state.configure(cfg, false, err)) {
+        return false;
+    }
+    turboquant_telemetry.set_trace_enabled(cfg.trace_enabled);
+    return true;
+}
+
+bool llama_context::turboquant_get_config(
+        llama_tq_context_config & out,
+        llama_tq_layer_config * layer_storage,
+        size_t layer_capacity,
+        size_t & n_layers_required,
+        llama_tq_error * err) const {
+    return turboquant_state.get_config(out, layer_storage, layer_capacity, n_layers_required, err);
+}
+
+bool llama_context::turboquant_get_last_metrics(llama_tq_consensus_metrics & out, llama_tq_error * err) const {
+    return turboquant_telemetry.get(out, err);
+}
+
+void llama_context::turboquant_reset_metrics() {
+    turboquant_telemetry.reset();
+}
+
+void llama_context::turboquant_mark_started() {
+    turboquant_state.mark_started();
 }
 
 ggml_backend_sched_t llama_context::get_sched() const {
@@ -3473,9 +3512,11 @@ llama_context_params llama_context_default_params() {
     return result;
 }
 
-llama_context * llama_init_from_model(
+static llama_context * llama_init_from_model_impl(
                  llama_model * model,
-        llama_context_params   params) {
+        llama_context_params   params,
+        const llama_tq_context_config * turboquant_config,
+              llama_tq_error * turboquant_error) {
     if (!model) {
         LLAMA_LOG_ERROR("%s: model cannot be NULL\n", __func__);
         return nullptr;
@@ -3573,10 +3614,14 @@ llama_context * llama_init_from_model(
     }
 
     try {
-        auto * ctx = new llama_context(*model, params);
+        auto * ctx = new llama_context(*model, params, turboquant_config, turboquant_error);
         return ctx;
     } catch (const std::exception & err) {
         LLAMA_LOG_ERROR("%s: failed to initialize the context: %s\n", __func__, err.what());
+        if (turboquant_error && turboquant_error->code == LLAMA_TQ_ERROR_NONE) {
+            turboquant_error->code = LLAMA_TQ_ERROR_UNAVAILABLE;
+            std::snprintf(turboquant_error->message, sizeof(turboquant_error->message), "%s", err.what());
+        }
     }
 
     return nullptr;
@@ -4051,10 +4096,112 @@ size_t llama_state_seq_load_file(llama_context * ctx, const char * filepath, lla
 
 ///
 
+static bool llama_tq_has_production_graph(llama_tq_execution execution) {
+    return execution == LLAMA_TQ_EXEC_SINGLE_VIEW || execution == LLAMA_TQ_EXEC_BEST_PER_LAYER;
+}
+
+static bool llama_tq_required_execution_available(
+        const llama_tq_context_config * cfg,
+        llama_tq_error * err) {
+    if (!cfg || !cfg->required || llama_tq_has_production_graph(cfg->execution)) {
+        return true;
+    }
+    if (err) {
+        err->code = LLAMA_TQ_ERROR_UNAVAILABLE;
+        std::snprintf(err->message, sizeof(err->message), "%s", "required TurboQuant execution mode has no production graph implementation");
+    }
+    return false;
+}
+
+bool llama_tq_context_configure(
+        llama_context * ctx,
+        const llama_tq_context_config * cfg,
+        llama_tq_error * err) {
+    if (!ctx || !cfg) {
+        if (err) {
+            err->code = LLAMA_TQ_ERROR_INVALID_ARGUMENT;
+            std::snprintf(err->message, sizeof(err->message), "%s", "ctx and cfg must be non-null");
+        }
+        return false;
+    }
+    if (!llama_tq_required_execution_available(cfg, err)) {
+        return false;
+    }
+    return ctx->turboquant_configure(*cfg, err);
+}
+
+llama_context * llama_init_from_model(
+                 llama_model * model,
+        llama_context_params   params) {
+    return llama_init_from_model_impl(model, params, nullptr, nullptr);
+}
+
+llama_context * llama_tq_init_from_model(
+                 llama_model * model,
+        llama_context_params   params,
+        const llama_tq_context_config * cfg,
+              llama_tq_error * err) {
+    if (err) {
+        err->code = LLAMA_TQ_ERROR_NONE;
+        err->message[0] = '\0';
+    }
+    if (!model || !cfg) {
+        if (err) {
+            err->code = LLAMA_TQ_ERROR_INVALID_ARGUMENT;
+            std::snprintf(err->message, sizeof(err->message), "%s", "model and cfg must be non-null");
+        }
+        return nullptr;
+    }
+    if (!llama_tq_required_execution_available(cfg, err)) {
+        return nullptr;
+    }
+    return llama_init_from_model_impl(model, params, cfg, err);
+}
+
+bool llama_tq_context_get_config(
+        const llama_context * ctx,
+        llama_tq_context_config * out,
+        llama_tq_layer_config * layer_storage,
+        size_t layer_capacity,
+        size_t * n_layers_required,
+        llama_tq_error * err) {
+    if (!ctx || !out || !n_layers_required) {
+        if (err) {
+            err->code = LLAMA_TQ_ERROR_INVALID_ARGUMENT;
+            std::snprintf(err->message, sizeof(err->message), "%s", "ctx, out and n_layers_required must be non-null");
+        }
+        return false;
+    }
+    return ctx->turboquant_get_config(*out, layer_storage, layer_capacity, *n_layers_required, err);
+}
+
+bool llama_tq_context_get_last_metrics(
+        const llama_context * ctx,
+        llama_tq_consensus_metrics * out,
+        llama_tq_error * err) {
+    if (!ctx || !out) {
+        if (err) {
+            err->code = LLAMA_TQ_ERROR_INVALID_ARGUMENT;
+            std::snprintf(err->message, sizeof(err->message), "%s", "ctx and out must be non-null");
+        }
+        return false;
+    }
+    return ctx->turboquant_get_last_metrics(*out, err);
+}
+
+void llama_tq_context_reset_metrics(llama_context * ctx) {
+    if (ctx) {
+        ctx->turboquant_reset_metrics();
+    }
+}
+
 int32_t llama_encode(
         llama_context * ctx,
           llama_batch   batch) {
     const int ret = ctx->encode(batch);
+    if (ret == 0) {
+        ctx->turboquant_mark_started();
+    }
     if (ret != 0) {
         LLAMA_LOG_ERROR("%s: failed to encode, ret = %d\n", __func__, ret);
     }
@@ -4066,6 +4213,9 @@ int32_t llama_decode(
         llama_context * ctx,
           llama_batch   batch) {
     const int ret = ctx->decode(batch);
+    if (ret == 0) {
+        ctx->turboquant_mark_started();
+    }
     if (ret != 0 && ret != 1) {
         LLAMA_LOG_ERROR("%s: failed to decode, ret = %d\n", __func__, ret);
     }

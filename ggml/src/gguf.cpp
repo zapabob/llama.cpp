@@ -1196,6 +1196,17 @@ size_t gguf_get_tensor_size(const struct gguf_context * ctx, int64_t tensor_id) 
     return ggml_nbytes(&ctx->info[tensor_id].t);
 }
 
+int gguf_get_tensor_n_dims(const struct gguf_context * ctx, int64_t tensor_id) {
+    GGML_ASSERT(tensor_id >= 0 && tensor_id < gguf_get_n_tensors(ctx));
+    return ggml_n_dims(&ctx->info[tensor_id].t);
+}
+
+int64_t gguf_get_tensor_ne(const struct gguf_context * ctx, int64_t tensor_id, int dim) {
+    GGML_ASSERT(tensor_id >= 0 && tensor_id < gguf_get_n_tensors(ctx));
+    GGML_ASSERT(dim >= 0 && dim < ggml_n_dims(&ctx->info[tensor_id].t));
+    return ctx->info[tensor_id].t.ne[dim];
+}
+
 int64_t gguf_remove_key(struct gguf_context * ctx, const char * key) {
     const int64_t key_id = gguf_find_key(ctx, key);
     if (key_id >= 0) {

@@ -233,6 +233,11 @@ set_tests_properties(test-download-model PROPERTIES FIXTURES_SETUP test-download
 llama_build_and_test(test-thread-safety.cpp ARGS -m "${MODEL_DEST}" -ngl 99 -p "The meaning of life is" -n 128 -c 256 -ub 32 -np 4 -t 2)
 set_tests_properties(test-thread-safety PROPERTIES FIXTURES_REQUIRED test-download-model)
 
+if (NOT WIN32 OR NOT BUILD_SHARED_LIBS)
+    llama_build_and_test(test-turboquant-context-config.cpp ARGS "${MODEL_DEST}")
+    set_tests_properties(test-turboquant-context-config PROPERTIES FIXTURES_REQUIRED test-download-model)
+endif()
+
 llama_build_and_test(test-arg-parser.cpp)
 
 if (NOT LLAMA_SANITIZE_ADDRESS AND NOT GGML_SCHED_NO_REALLOC)
@@ -265,10 +270,24 @@ if (NOT GGML_BACKEND_DL)
     llama_build_and_test(test-quantize-perf.cpp)
     llama_build_and_test(test-rope.cpp)
     if (NOT WIN32 OR NOT BUILD_SHARED_LIBS)
+        function(llama_tq_reference_test source)
+            get_filename_component(target ${source} NAME_WE)
+            add_executable(${target} ${source} ../src/llama-turboquant-consensus.cpp)
+            target_compile_features(${target} PRIVATE cxx_std_17)
+            if (LLAMA_TESTS_INSTALL)
+                install(TARGETS ${target} RUNTIME)
+            endif()
+            llama_test(${target})
+        endfunction()
         # These TurboQuant tests reach internal helpers that are not exported from
         # shared llama.dll builds on Windows.
         llama_build_and_test(test-turboquant-artifact.cpp)
+        llama_tq_reference_test(test-turboquant-consensus.cpp)
         llama_build_and_test(test-turboquant-gguf-metadata.cpp)
+        llama_build_and_test(test-turboquant-ka-controller.cpp)
+        llama_tq_reference_test(test-turboquant-residual-parity.cpp)
+        llama_build_and_test(test-turboquant-telemetry.cpp)
+        llama_tq_reference_test(test-turboquant-triality-kv.cpp)
         # This test reaches internal TurboQuant reference helpers that are not exported from
         # shared llama.dll builds on Windows.
         llama_build_and_test(test-turboquant-runtime-reference.cpp)
@@ -290,6 +309,8 @@ if (NOT GGML_BACKEND_DL)
     endif()
     llama_build_and_test(test-col2im-1d.cpp)
 endif()
+
+llama_build_and_test(test-turboquant-c-api.c)
 
 # libmtmd
 set(LLAMA_TEST_NAME test-mtmd-c-api)

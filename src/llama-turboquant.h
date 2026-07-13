@@ -1,5 +1,7 @@
 #pragma once
 
+#include "../include/llama-turboquant.h"
+
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -86,6 +88,33 @@ struct llama_turboquant_weight_gguf_metadata {
     std::string payload_json;
 };
 
+struct llama_tq_ncka_metadata {
+    bool enabled = false;
+    bool required = false;
+    uint32_t schema_version = 0;
+    std::string controller_type;
+    std::vector<std::string> coordinate_names;
+    uint32_t outer_count = 0;
+    uint32_t knot_count = 0;
+    bool s3_equivariant = false;
+    std::string controller_sha256;
+    std::string normalisation_sha256;
+    bool static_fallback_selected = false;
+};
+
+struct llama_tq_urt_metadata {
+    bool enabled = false;
+    uint32_t schema_version = 0;
+    std::string abstract_algebra_id;
+    std::string operator_word_manifest;
+    std::string operator_word_sha256;
+    std::string reference_representation;
+    std::vector<std::string> supported_representations;
+    float consistency_tolerance = 0.0f;
+    uint32_t moment_degree = 0;
+    std::string moment_manifest_sha256;
+};
+
 struct llama_turboquant_gguf_metadata {
     bool present = false;
     uint32_t schema_version = 0;
@@ -95,6 +124,45 @@ struct llama_turboquant_gguf_metadata {
     std::string public_cache_type_k;
     std::string public_cache_type_v;
     llama_turboquant_weight_gguf_metadata weight;
+    std::string profile;
+    bool three_view_bundle = false;
+    llama_tq_execution execution = LLAMA_TQ_EXEC_SINGLE_VIEW;
+    std::vector<llama_tq_layer_config> consensus_layers;
+    float js_fallback_threshold = 0.0f;
+    llama_tq_ncka_metadata ncka;
+    llama_tq_urt_metadata urt;
+};
+
+struct llama_tq_owned_context_config {
+    uint32_t schema_version = 0;
+    llama_tq_execution execution = LLAMA_TQ_EXEC_SINGLE_VIEW;
+    std::vector<llama_tq_layer_config> layers;
+    bool required = false;
+    bool trace_enabled = false;
+    float js_fallback_threshold = 0.0f;
+};
+
+class llama_tq_context_state {
+public:
+    explicit llama_tq_context_state(size_t model_layer_count = 0);
+
+    bool configure(const llama_tq_context_config & cfg, bool initialization, llama_tq_error * err);
+    bool get_config(
+        llama_tq_context_config & out,
+        llama_tq_layer_config * layer_storage,
+        size_t layer_capacity,
+        size_t & n_layers_required,
+        llama_tq_error * err) const;
+    void mark_started();
+    bool started() const;
+    bool trace_enabled() const;
+
+private:
+    size_t model_layer_count_ = 0;
+    bool started_ = false;
+    bool configured_ = false;
+    uint8_t storage_view_capacity_ = 1;
+    llama_tq_owned_context_config config_;
 };
 
 struct llama_turboquant_artifact {

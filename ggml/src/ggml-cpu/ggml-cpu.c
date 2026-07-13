@@ -222,7 +222,7 @@ static void ggml_vec_dot_turbo4_0_f32(int n, float * GGML_RESTRICT s, size_t bs,
 static void ggml_vec_dot_tq3_1s_q8_0(int n, float * GGML_RESTRICT s, size_t bs,
                                        const void * GGML_RESTRICT vx, size_t bx,
                                        const void * GGML_RESTRICT vy, size_t by, int nrc);
-static void ggml_vec_dot_tq4_1s_q8_0(int n, float * GGML_RESTRICT s, size_t bs,
+static void ggml_vec_dot_tq4_1s_q8_0_reference(int n, float * GGML_RESTRICT s, size_t bs,
                                        const void * GGML_RESTRICT vx, size_t bx,
                                        const void * GGML_RESTRICT vy, size_t by, int nrc);
 
@@ -426,7 +426,7 @@ static const struct ggml_type_traits_cpu type_traits_cpu[GGML_TYPE_COUNT] = {
     },
     [GGML_TYPE_TQ4_1S] = {
         .from_float               = quantize_row_tq4_1s,
-        .vec_dot                  = ggml_vec_dot_tq4_1s_q8_0,
+        .vec_dot                  = ggml_vec_dot_tq4_1s_q8_0_reference,
         .vec_dot_type             = GGML_TYPE_Q8_0,
         .nrows                    = 1,
     },
@@ -3553,7 +3553,7 @@ static void ggml_vec_dot_tq3_1s_q8_0(int n, float * GGML_RESTRICT s, size_t bs,
 
 // TQ4_1S vec_dot: dequantize tq4_1s block to f32, then dot with q8_0.
 // TODO: optimize with SIMD intrinsics
-static void ggml_vec_dot_tq4_1s_q8_0(int n, float * GGML_RESTRICT s, size_t bs,
+static void ggml_vec_dot_tq4_1s_q8_0_reference(int n, float * GGML_RESTRICT s, size_t bs,
                                        const void * GGML_RESTRICT vx, size_t bx,
                                        const void * GGML_RESTRICT vy, size_t by, int nrc) {
     GGML_ASSERT(nrc == 1);

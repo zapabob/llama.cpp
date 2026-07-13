@@ -1218,6 +1218,11 @@ void llama_model_base::load_hparams(llama_model_loader & ml) {
     }
 
     hparams.rope_type = llama_model_rope_type(this);
+
+    std::string turboquant_error;
+    if (!llama_turboquant_load_gguf_metadata(ctx, hparams.n_layer(), turboquant_metadata, &turboquant_error)) {
+        throw std::runtime_error("invalid TurboQuant GGUF contract: " + turboquant_error);
+    }
 }
 
 void llama_model_base::load_vocab(llama_model_loader & ml) {
@@ -2581,6 +2586,40 @@ int32_t llama_model_meta_val_str(const llama_model * model, const char * key, ch
         return -1;
     }
     return snprintf(buf, buf_size, "%s", it->second.c_str());
+}
+
+bool llama_tq_model_get_capabilities(
+        const llama_model * model,
+        llama_tq_model_capabilities * out,
+        llama_tq_error * err) {
+    if (err) {
+        err->code = LLAMA_TQ_ERROR_NONE;
+        err->message[0] = '\0';
+    }
+    if (!model || !out) {
+        if (err) {
+            err->code = LLAMA_TQ_ERROR_INVALID_ARGUMENT;
+            std::snprintf(err->message, sizeof(err->message), "%s", "model and out must be non-null");
+        }
+        return false;
+    }
+
+    *out = {};
+    const auto & metadata = model->turboquant_metadata;
+    out->metadata_present = metadata.present;
+    if (!metadata.present) {
+        return true;
+    }
+    out->three_view_bundle = metadata.three_view_bundle;
+    out->ncka_available = metadata.ncka.enabled && !metadata.ncka.static_fallback_selected;
+    out->ncka_static_fallback_selected = metadata.ncka.static_fallback_selected;
+    out->urt_available = metadata.urt.enabled;
+    out->schema_version = metadata.schema_version;
+    out->n_layers = static_cast<uint32_t>(metadata.layers.size());
+    out->selected_execution = metadata.execution;
+    out->supported_execution_mask = LLAMA_TQ_CAP_SINGLE_VIEW | LLAMA_TQ_CAP_BEST_PER_LAYER;
+    std::snprintf(out->profile_id, sizeof(out->profile_id), "%s", metadata.profile.c_str());
+    return true;
 }
 
 int32_t llama_model_meta_count(const llama_model * model) {

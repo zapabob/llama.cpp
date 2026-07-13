@@ -5,6 +5,7 @@
 #include "llama-graph.h"
 #include "llama-hparams.h"
 #include "llama-memory.h"
+#include "llama-turboquant.h"
 #include "llama-vocab.h"
 
 #include <map>
@@ -613,6 +614,7 @@ struct llama_model {
 
     // gguf metadata
     std::unordered_map<std::string, std::string> gguf_kv;
+    llama_turboquant_gguf_metadata turboquant_metadata;
 
     // list of devices used in this model
     std::vector<llama_device> devices;

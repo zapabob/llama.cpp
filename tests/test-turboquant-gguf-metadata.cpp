@@ -3,6 +3,7 @@
 #include "../src/llama-turboquant.h"
 
 #include "gguf.h"
+#include "ggml.h"
 
 #include <cmath>
 #include <memory>
@@ -92,6 +93,82 @@ static void populate_public_weight_metadata(gguf_context * ctx) {
     gguf_set_val_str(ctx, "hypura.turboquant.weight.payload_format", "json-inline-v1");
     gguf_set_val_u64(ctx, "hypura.turboquant.weight.payload_bytes", 32);
     gguf_set_val_str(ctx, "hypura.turboquant.weight.payload_json", "{\"enabled\":true}");
+}
+
+static void add_f32_tensor(gguf_context * ctx, const std::string & name, const std::vector<int64_t> & dimensions) {
+    ggml_init_params params = {};
+    params.mem_size = 64 * 1024;
+    params.no_alloc = true;
+    ggml_context * tensor_ctx = ggml_init(params);
+    ggml_tensor * tensor = ggml_new_tensor(tensor_ctx, GGML_TYPE_F32, dimensions.size(), dimensions.data());
+    ggml_set_name(tensor, name.c_str());
+    gguf_add_tensor(ctx, tensor);
+    ggml_free(tensor_ctx);
+}
+
+static void populate_schema_v2(
+        gguf_context * ctx,
+        uint32_t n_layers = 2,
+        bool include_last_rotation = true,
+        bool transpose_consensus = false) {
+    populate_complete_metadata(ctx, n_layers);
+    gguf_set_val_u32(ctx, "tq_schema_version", 2);
+    populate_public_weight_metadata(ctx);
+    gguf_set_val_u32(ctx, "hypura.turboquant.schema_version", 2);
+    gguf_set_val_str(ctx, "hypura.turboquant.triality.profile_id", "balanced");
+    gguf_set_val_str(ctx, "hypura.turboquant.triality.execution", "attention_logit_consensus");
+    gguf_set_val_u32(ctx, "hypura.turboquant.triality.view_count", 3);
+    set_str_array(ctx, "hypura.turboquant.triality.views", {"vector", "spinor_plus_proxy", "spinor_minus_proxy"});
+    std::vector<float> weights(static_cast<size_t>(n_layers) * 3, 1.0f / 3.0f);
+    std::vector<float> bias(static_cast<size_t>(n_layers) * 3, 0.0f);
+    std::vector<float> scale(static_cast<size_t>(n_layers) * 3, 1.0f);
+    std::vector<float> temperature(static_cast<size_t>(n_layers) * 3, 1.0f);
+    set_f32_array(ctx, "hypura.turboquant.triality.weights", weights);
+    set_f32_array(ctx, "hypura.turboquant.triality.bias", bias);
+    set_f32_array(ctx, "hypura.turboquant.triality.scale", scale);
+    set_f32_array(ctx, "hypura.turboquant.triality.temperature", temperature);
+    gguf_set_val_f32(ctx, "hypura.turboquant.triality.js_fallback_threshold", 0.1f);
+
+    const std::vector<std::string> views = {"vector", "spinor_plus_proxy", "spinor_minus_proxy"};
+    for (uint32_t layer = 0; layer < n_layers; ++layer) {
+        for (size_t view = 0; view < views.size(); ++view) {
+            if (!include_last_rotation && layer + 1 == n_layers && view + 1 == views.size()) {
+                continue;
+            }
+            add_f32_tensor(
+                ctx,
+                "turboquant.profile.balanced.layer." + std::to_string(layer) + ".rotation." + views[view],
+                {8, 8});
+        }
+    }
+    for (const std::string & field : {"weights", "bias", "scale", "temperature"}) {
+        add_f32_tensor(
+            ctx,
+            "turboquant.profile.balanced.consensus." + field,
+            transpose_consensus ? std::vector<int64_t>{n_layers, 3} : std::vector<int64_t>{3, n_layers});
+    }
+
+    gguf_set_val_bool(ctx, "hypura.turboquant.ncka.enabled", false);
+    gguf_set_val_bool(ctx, "hypura.turboquant.ncka.required", false);
+    gguf_set_val_u32(ctx, "hypura.turboquant.ncka.schema_version", 1);
+    gguf_set_val_str(ctx, "hypura.turboquant.ncka.controller_type", "finite_moment_ka_v1");
+    set_str_array(ctx, "hypura.turboquant.ncka.coordinate_names", {});
+    gguf_set_val_u32(ctx, "hypura.turboquant.ncka.outer_count", 0);
+    gguf_set_val_u32(ctx, "hypura.turboquant.ncka.knot_count", 0);
+    gguf_set_val_bool(ctx, "hypura.turboquant.ncka.s3_equivariant", true);
+    gguf_set_val_str(ctx, "hypura.turboquant.ncka.controller_sha256", "");
+    gguf_set_val_str(ctx, "hypura.turboquant.ncka.normalisation_sha256", "");
+
+    gguf_set_val_bool(ctx, "hypura.turboquant.urt.enabled", false);
+    gguf_set_val_u32(ctx, "hypura.turboquant.urt.schema_version", 1);
+    gguf_set_val_str(ctx, "hypura.turboquant.urt.abstract_algebra_id", "");
+    gguf_set_val_str(ctx, "hypura.turboquant.urt.operator_word_manifest", "");
+    gguf_set_val_str(ctx, "hypura.turboquant.urt.operator_word_sha256", "");
+    gguf_set_val_str(ctx, "hypura.turboquant.urt.reference_representation", "");
+    set_str_array(ctx, "hypura.turboquant.urt.supported_representations", {});
+    gguf_set_val_f32(ctx, "hypura.turboquant.urt.consistency_tolerance", 0.0f);
+    gguf_set_val_u32(ctx, "hypura.turboquant.urt.moment_degree", 0);
+    gguf_set_val_str(ctx, "hypura.turboquant.urt.moment_manifest_sha256", "");
 }
 
 } // namespace
@@ -200,6 +277,132 @@ int main() {
         t.assert_equal("triality view", std::string("spinor_minus_proxy"), metadata.layers[0].triality_view);
         t.assert_equal("public cache type k", std::string("best_per_layer"), metadata.public_cache_type_k);
         t.assert_equal("public cache type v", std::string("turbo4"), metadata.public_cache_type_v);
+    });
+
+    t.test("schema_v2_accepts_the_complete_three_view_contract", [](testing & t) {
+        auto ctx = make_ctx();
+        populate_schema_v2(ctx.get());
+        llama_turboquant_gguf_metadata metadata;
+        std::string error;
+        t.assert_true("parse succeeds", llama_turboquant_load_gguf_metadata(ctx.get(), 2, metadata, &error));
+        t.assert_true("three-view bundle", metadata.three_view_bundle);
+        t.assert_equal("profile", std::string("balanced"), metadata.profile);
+        t.assert_equal("consensus layers", size_t(2), metadata.consensus_layers.size());
+    });
+
+    t.test("schema_v2_rejects_a_missing_rotation", [](testing & t) {
+        auto ctx = make_ctx();
+        populate_schema_v2(ctx.get(), 2, false);
+        llama_turboquant_gguf_metadata metadata;
+        std::string error;
+        t.assert_true("parse fails", !llama_turboquant_load_gguf_metadata(ctx.get(), 2, metadata, &error));
+        t.assert_true("metadata reset", !metadata.present);
+        t.assert_true("rotation named", error.find("rotation.spinor_minus_proxy") != std::string::npos);
+    });
+
+    t.test("schema_v2_rejects_invalid_weight_rows", [](testing & t) {
+        auto ctx = make_ctx();
+        populate_schema_v2(ctx.get());
+        set_f32_array(ctx.get(), "hypura.turboquant.triality.weights", {0.5f, 0.5f, -0.1f, 0.3f, 0.3f, 0.4f});
+        llama_turboquant_gguf_metadata metadata;
+        std::string error;
+        t.assert_true("negative weight fails", !llama_turboquant_load_gguf_metadata(ctx.get(), 2, metadata, &error));
+    });
+
+    t.test("schema_v2_rejects_transposed_consensus_tensors", [](testing & t) {
+        auto ctx = make_ctx();
+        populate_schema_v2(ctx.get(), 2, true, true);
+        llama_turboquant_gguf_metadata metadata;
+        std::string error;
+        t.assert_true("parse fails", !llama_turboquant_load_gguf_metadata(ctx.get(), 2, metadata, &error));
+        t.assert_true("shape error", error.find("invalid shape") != std::string::npos);
+    });
+
+    t.test("schema_v2_optional_unsupported_ncka_selects_static_fallback", [](testing & t) {
+        auto ctx = make_ctx();
+        populate_schema_v2(ctx.get());
+        gguf_set_val_bool(ctx.get(), "hypura.turboquant.ncka.enabled", true);
+        gguf_set_val_u32(ctx.get(), "hypura.turboquant.ncka.schema_version", 99);
+        set_str_array(ctx.get(), "hypura.turboquant.ncka.coordinate_names", {"mean", "variance"});
+        gguf_set_val_u32(ctx.get(), "hypura.turboquant.ncka.outer_count", 1);
+        gguf_set_val_u32(ctx.get(), "hypura.turboquant.ncka.knot_count", 2);
+        gguf_set_val_str(ctx.get(), "hypura.turboquant.ncka.controller_sha256", std::string(64, 'a').c_str());
+        gguf_set_val_str(ctx.get(), "hypura.turboquant.ncka.normalisation_sha256", std::string(64, 'b').c_str());
+        add_f32_tensor(ctx.get(), "turboquant.profile.balanced.ncka.fallback_weights", {3});
+        llama_turboquant_gguf_metadata metadata;
+        std::string error;
+        t.assert_true("parse succeeds", llama_turboquant_load_gguf_metadata(ctx.get(), 2, metadata, &error));
+        t.assert_true("static fallback selected", metadata.ncka.static_fallback_selected);
+    });
+
+    t.test("schema_v2_required_unsupported_ncka_fails_closed", [](testing & t) {
+        auto ctx = make_ctx();
+        populate_schema_v2(ctx.get());
+        gguf_set_val_bool(ctx.get(), "hypura.turboquant.ncka.enabled", true);
+        gguf_set_val_bool(ctx.get(), "hypura.turboquant.ncka.required", true);
+        gguf_set_val_u32(ctx.get(), "hypura.turboquant.ncka.schema_version", 99);
+        llama_turboquant_gguf_metadata metadata;
+        std::string error;
+        t.assert_true("parse fails", !llama_turboquant_load_gguf_metadata(ctx.get(), 2, metadata, &error));
+        t.assert_true("required error", error.find("required NC-KA") != std::string::npos);
+    });
+
+    t.test("schema_v2_accepts_supported_ncka_tensor_layout", [](testing & t) {
+        auto ctx = make_ctx();
+        populate_schema_v2(ctx.get());
+        gguf_set_val_bool(ctx.get(), "hypura.turboquant.ncka.enabled", true);
+        set_str_array(ctx.get(), "hypura.turboquant.ncka.coordinate_names", {"mean", "variance"});
+        gguf_set_val_u32(ctx.get(), "hypura.turboquant.ncka.outer_count", 1);
+        gguf_set_val_u32(ctx.get(), "hypura.turboquant.ncka.knot_count", 2);
+        gguf_set_val_str(ctx.get(), "hypura.turboquant.ncka.controller_sha256", std::string(64, 'a').c_str());
+        gguf_set_val_str(ctx.get(), "hypura.turboquant.ncka.normalisation_sha256", std::string(64, 'b').c_str());
+        add_f32_tensor(ctx.get(), "turboquant.profile.balanced.ncka.fallback_weights", {3});
+        add_f32_tensor(ctx.get(), "turboquant.profile.balanced.ncka.coordinate_min", {2});
+        add_f32_tensor(ctx.get(), "turboquant.profile.balanced.ncka.coordinate_max", {2});
+        add_f32_tensor(ctx.get(), "turboquant.profile.balanced.ncka.inner_knots", {2, 2, 1, 3});
+        add_f32_tensor(ctx.get(), "turboquant.profile.balanced.ncka.inner_values", {2, 2, 1, 3});
+        add_f32_tensor(ctx.get(), "turboquant.profile.balanced.ncka.outer_knots", {2, 1, 3});
+        add_f32_tensor(ctx.get(), "turboquant.profile.balanced.ncka.outer_values", {2, 1, 3});
+        llama_turboquant_gguf_metadata metadata;
+        std::string error;
+        t.assert_true("parse succeeds", llama_turboquant_load_gguf_metadata(ctx.get(), 2, metadata, &error));
+        t.assert_true("controller active", metadata.ncka.enabled && !metadata.ncka.static_fallback_selected);
+    });
+
+    t.test("schema_v2_urt_rejects_a_manifest_hash_mismatch", [](testing & t) {
+        auto ctx = make_ctx();
+        populate_schema_v2(ctx.get());
+        gguf_set_val_bool(ctx.get(), "hypura.turboquant.urt.enabled", true);
+        gguf_set_val_str(ctx.get(), "hypura.turboquant.urt.abstract_algebra_id", "triality-v1");
+        gguf_set_val_str(ctx.get(), "hypura.turboquant.urt.operator_word_manifest", "{}");
+        gguf_set_val_str(ctx.get(), "hypura.turboquant.urt.operator_word_sha256", std::string(64, '0').c_str());
+        gguf_set_val_str(ctx.get(), "hypura.turboquant.urt.reference_representation", "vector");
+        set_str_array(ctx.get(), "hypura.turboquant.urt.supported_representations", {"vector"});
+        gguf_set_val_f32(ctx.get(), "hypura.turboquant.urt.consistency_tolerance", 1e-4f);
+        gguf_set_val_u32(ctx.get(), "hypura.turboquant.urt.moment_degree", 2);
+        gguf_set_val_str(ctx.get(), "hypura.turboquant.urt.moment_manifest_sha256", std::string(64, 'c').c_str());
+        llama_turboquant_gguf_metadata metadata;
+        std::string error;
+        t.assert_true("parse fails", !llama_turboquant_load_gguf_metadata(ctx.get(), 2, metadata, &error));
+        t.assert_true("hash error", error.find("hash-invalid") != std::string::npos);
+    });
+
+    t.test("schema_v2_urt_accepts_a_canonical_manifest_hash", [](testing & t) {
+        auto ctx = make_ctx();
+        populate_schema_v2(ctx.get());
+        gguf_set_val_bool(ctx.get(), "hypura.turboquant.urt.enabled", true);
+        gguf_set_val_str(ctx.get(), "hypura.turboquant.urt.abstract_algebra_id", "triality-v1");
+        gguf_set_val_str(ctx.get(), "hypura.turboquant.urt.operator_word_manifest", "{}");
+        gguf_set_val_str(ctx.get(), "hypura.turboquant.urt.operator_word_sha256", "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a");
+        gguf_set_val_str(ctx.get(), "hypura.turboquant.urt.reference_representation", "vector");
+        set_str_array(ctx.get(), "hypura.turboquant.urt.supported_representations", {"vector", "spinor_plus_proxy"});
+        gguf_set_val_f32(ctx.get(), "hypura.turboquant.urt.consistency_tolerance", 1e-4f);
+        gguf_set_val_u32(ctx.get(), "hypura.turboquant.urt.moment_degree", 2);
+        gguf_set_val_str(ctx.get(), "hypura.turboquant.urt.moment_manifest_sha256", std::string(64, 'c').c_str());
+        llama_turboquant_gguf_metadata metadata;
+        std::string error;
+        t.assert_true("parse succeeds", llama_turboquant_load_gguf_metadata(ctx.get(), 2, metadata, &error));
+        t.assert_true("urt active", metadata.urt.enabled);
     });
 
     return t.summary();
