@@ -16,6 +16,8 @@ LLM inference in C/C++
 
 This fork is a research-grade `llama.cpp` branch for testing whether long-context KV cache memory can be cut on consumer NVIDIA GPUs without treating quantization as a reconstruction-only problem. The custom path combines TurboQuant KV-cache compression with an SO(8) Triality-inspired K-side protection layer, exposed as `key_only_block_so8_triality_vector`, while preserving current upstream `llama.cpp` server/API behavior.
 
+The current public runtime, GGUF schema-v2, four execution modes, parity-coupled residual storage, availability limits, and measured standard `sm_120` CUDA evidence are documented in [TurboQuant Triality runtime contract](docs/turboquant-triality.md).
+
 For a recruiter or engineering reviewer: the interesting work is not another low-bit quantizer, but the validation loop around it. K is protected through the SO(8) vector view, V is compressed with the smallest passing TurboQuant tier, and the result is selected by ablation statistics rather than by visual inspection or a single happy-path prompt.
 
 ![K-side SO8 Triality orthogonality error with error bars](docs/research/so8-triarity-turboquant/plots/k_triality_orthogonality_error.png)

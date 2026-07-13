@@ -1,11 +1,14 @@
 #pragma once
 
+#include <array>
+
 #include "../include/llama-turboquant.h"
 
 #include <cstdint>
 #include <string>
 #include <vector>
 
+struct ggml_tensor;
 struct gguf_context;
 
 // Compatibility note: legacy bridge surfaces still accept zapabob/TheTom-style
@@ -115,9 +118,24 @@ struct llama_tq_urt_metadata {
     std::string moment_manifest_sha256;
 };
 
+struct llama_tq_residual_parity_layer_metadata {
+    std::array<uint8_t, 3> sector_bits{ 0, 0, 0 };
+    std::array<float, 3> fixed_sector_scales{ 0.0f, 0.0f, 0.0f };
+    std::array<float, 2> beta{ 0.0f, 0.0f };
+};
+
+struct llama_tq_residual_parity_metadata {
+    bool present = false;
+    std::string mode;
+    std::vector<llama_tq_residual_parity_layer_metadata> layers;
+    uint32_t payload_bits_per_channel_milli = 0;
+    uint32_t controller_bytes = 0;
+};
+
 struct llama_turboquant_gguf_metadata {
     bool present = false;
     uint32_t schema_version = 0;
+    uint32_t public_schema_version = 0;
     std::vector<llama_turboquant_gguf_layer_metadata> layers;
     std::string public_runtime_mode;
     std::string public_triality_view;
@@ -131,6 +149,7 @@ struct llama_turboquant_gguf_metadata {
     float js_fallback_threshold = 0.0f;
     llama_tq_ncka_metadata ncka;
     llama_tq_urt_metadata urt;
+    llama_tq_residual_parity_metadata residual_parity;
 };
 
 struct llama_tq_owned_context_config {
@@ -140,6 +159,7 @@ struct llama_tq_owned_context_config {
     bool required = false;
     bool trace_enabled = false;
     float js_fallback_threshold = 0.0f;
+    bool allow_identity_view_fallback = false;
 };
 
 class llama_tq_context_state {
@@ -156,12 +176,18 @@ public:
     void mark_started();
     bool started() const;
     bool trace_enabled() const;
+    bool configured() const;
+    uint8_t storage_view_capacity() const;
+    uint64_t revision() const;
+    const llama_tq_owned_context_config * config() const;
 
 private:
     size_t model_layer_count_ = 0;
     bool started_ = false;
     bool configured_ = false;
     uint8_t storage_view_capacity_ = 1;
+    llama_tq_execution storage_execution_ = LLAMA_TQ_EXEC_SINGLE_VIEW;
+    uint64_t revision_ = 0;
     llama_tq_owned_context_config config_;
 };
 
@@ -185,6 +211,11 @@ bool llama_turboquant_load_gguf_metadata(
 
 bool llama_turboquant_validate_so8_rotation(
     const std::vector<float> & rotation_matrix,
+    float atol,
+    std::string * error);
+
+bool llama_turboquant_validate_so8_rotation_tensor(
+    const ggml_tensor * tensor,
     float atol,
     std::string * error);
 

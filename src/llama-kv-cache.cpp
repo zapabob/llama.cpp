@@ -17,6 +17,224 @@ static bool ggml_is_power_of_2(int n) {
     return (n & (n - 1)) == 0;
 }
 
+static constexpr uint32_t LLAMA_KV_STATE_K_VIEW_MARKER = 0x54514b56u;
+static constexpr uint32_t LLAMA_KV_STATE_RESIDUAL_MARKER = 0x54515250u;
+static constexpr uint32_t LLAMA_KV_STATE_RESIDUAL_VERSION = 2u;
+
+static void tq_residual_rotate(
+        const std::vector<float> & matrix,
+        const float * input,
+        float * output,
+        uint32_t width,
+        bool transpose) {
+    for (uint32_t row = 0; row < width; ++row) {
+        float sum = 0.0f;
+        for (uint32_t col = 0; col < width; ++col) {
+            const size_t index = transpose ? static_cast<size_t>(col) * width + row : static_cast<size_t>(row) * width + col;
+            sum += matrix[index] * input[col];
+        }
+        output[row] = sum;
+    }
+}
+
+static uint8_t tq_residual_minus_bit(uint8_t main_code, uint8_t selector) {
+    return static_cast<uint8_t>((selector ^ (main_code & 1u)) & 1u);
+}
+
+static uint8_t tq_residual_choose_selector(
+        uint8_t main_code,
+        float plus_value,
+        float minus_value,
+        const std::array<float, 3> & scales,
+        const std::array<float, 2> & beta) {
+    double best_error = std::numeric_limits<double>::infinity();
+    uint8_t best_selector = 0;
+    for (uint8_t selector = 0; selector < 2; ++selector) {
+        const uint8_t minus_bit = tq_residual_minus_bit(main_code, selector);
+        const double plus_error = static_cast<double>(plus_value) -
+            (selector ? scales[1] : -scales[1]);
+        const double minus_error = static_cast<double>(minus_value) -
+            (minus_bit ? scales[2] : -scales[2]);
+        const double error = static_cast<double>(beta[0]) * beta[0] * plus_error * plus_error +
+            static_cast<double>(beta[1]) * beta[1] * minus_error * minus_error;
+        if (error < best_error) {
+            best_error = error;
+            best_selector = selector;
+        }
+    }
+    return best_selector;
+}
+
+static void tq_residual_pack4(uint8_t * row, uint32_t channel, uint8_t main_code, uint8_t selector) {
+    const uint32_t bit = channel * 4u;
+    const uint32_t byte = bit >> 3;
+    const uint32_t shift = bit & 7u;
+    const uint16_t code = static_cast<uint16_t>((main_code & 0x07u) | ((selector & 1u) << 3));
+    const uint16_t value = code << shift;
+    row[byte] |= static_cast<uint8_t>(value & 0xffu);
+    if (shift > 4u) {
+        row[byte + 1] |= static_cast<uint8_t>(value >> 8);
+    }
+}
+
+static uint8_t tq_residual_unpack4(const uint8_t * row, uint32_t channel) {
+    const uint32_t bit = channel * 4u;
+    const uint32_t byte = bit >> 3;
+    const uint32_t shift = bit & 7u;
+    uint16_t value = row[byte];
+    if (shift > 4u) {
+        value |= static_cast<uint16_t>(row[byte + 1]) << 8;
+    }
+    return static_cast<uint8_t>((value >> shift) & 0x0fu);
+}
+
+static bool tq_residual_row_valid(const uint8_t * row, uint32_t logical_channels, uint32_t row_bytes) {
+    for (uint32_t channel = 0; channel < logical_channels; ++channel) {
+        if ((tq_residual_unpack4(row, channel) & 0x07u) == 0x04u) {
+            return false;
+        }
+    }
+    const uint32_t used_bits = logical_channels * 4u;
+    const uint32_t padding_bits = row_bytes * 8u - used_bits;
+    if (padding_bits != 0u) {
+        const uint8_t used_mask = static_cast<uint8_t>((1u << (8u - padding_bits)) - 1u);
+        if ((row[row_bytes - 1] & static_cast<uint8_t>(~used_mask)) != 0u) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void llama_kv_cache::residual_encode_op(
+        ggml_tensor * dst,
+  const ggml_tensor * seed,
+  const ggml_tensor * src,
+                int   ith,
+                int   nth,
+             void *   userdata) {
+    GGML_UNUSED(seed);
+    GGML_UNUSED(ith);
+    GGML_UNUSED(nth);
+    GGML_ASSERT(dst->type == GGML_TYPE_I8 && src->type == GGML_TYPE_F32);
+    auto & state = *static_cast<residual_layer_state *>(userdata);
+    GGML_ASSERT(static_cast<uint32_t>(dst->ne[0]) == state.row_bytes);
+    GGML_ASSERT(static_cast<uint32_t>(src->ne[0]) == state.head_dim);
+    GGML_ASSERT(static_cast<uint32_t>(src->ne[1]) == state.n_head);
+
+    std::vector<float> main_rot(state.head_dim);
+    std::vector<float> main_dequant(state.head_dim);
+    std::vector<float> main_recon(state.head_dim);
+    std::vector<float> residual(state.head_dim);
+    std::vector<float> plus_rot(state.head_dim);
+    std::vector<float> minus_rot(state.head_dim);
+    const uint64_t n_rows = ggml_nrows(src) / state.n_head;
+    for (uint64_t row_index = 0; row_index < n_rows; ++row_index) {
+        auto * packed = static_cast<uint8_t *>(dst->data) + row_index * dst->nb[1];
+        std::memset(packed, 0, state.row_bytes);
+        for (uint32_t head = 0; head < state.n_head; ++head) {
+            const auto * input = reinterpret_cast<const float *>(
+                static_cast<const uint8_t *>(src->data) + row_index * src->nb[2] + head * src->nb[1]);
+            tq_residual_rotate(state.rotations[0], input, main_rot.data(), state.head_dim, false);
+            for (uint32_t channel = 0; channel < state.head_dim; ++channel) {
+                const int q = std::clamp(static_cast<int>(std::nearbyint(main_rot[channel] / state.scales[0])), -3, 3);
+                main_dequant[channel] = q * state.scales[0];
+            }
+            tq_residual_rotate(state.rotations[0], main_dequant.data(), main_recon.data(), state.head_dim, true);
+            for (uint32_t channel = 0; channel < state.head_dim; ++channel) {
+                residual[channel] = input[channel] - main_recon[channel];
+            }
+            tq_residual_rotate(state.rotations[1], residual.data(), plus_rot.data(), state.head_dim, false);
+            tq_residual_rotate(state.rotations[2], residual.data(), minus_rot.data(), state.head_dim, false);
+            for (uint32_t channel = 0; channel < state.head_dim; ++channel) {
+                const int q = std::clamp(static_cast<int>(std::nearbyint(main_rot[channel] / state.scales[0])), -3, 3);
+                const uint8_t code = static_cast<uint8_t>(q) & 0x07u;
+                const uint8_t selector = tq_residual_choose_selector(
+                    code, plus_rot[channel], minus_rot[channel], state.scales, state.beta);
+                tq_residual_pack4(packed, head * state.head_dim + channel, code, selector);
+            }
+        }
+    }
+}
+
+void llama_kv_cache::residual_decode_op(
+        ggml_tensor * dst,
+  const ggml_tensor * seed,
+  const ggml_tensor * src,
+                int   ith,
+                int   nth,
+             void *   userdata) {
+    GGML_UNUSED(seed);
+    GGML_UNUSED(ith);
+    GGML_UNUSED(nth);
+    GGML_ASSERT(dst->type == GGML_TYPE_F32 && src->type == GGML_TYPE_I8);
+    auto & state = *static_cast<residual_layer_state *>(userdata);
+    std::vector<float> main(state.head_dim);
+    std::vector<float> plus(state.head_dim);
+    std::vector<float> minus(state.head_dim);
+    std::vector<float> main_inv(state.head_dim);
+    std::vector<float> plus_inv(state.head_dim);
+    std::vector<float> minus_inv(state.head_dim);
+    const uint64_t n_kv = dst->ne[2];
+    const uint64_t n_stream = dst->ne[3];
+    for (uint64_t row_index = 0; row_index < n_kv * n_stream; ++row_index) {
+        const uint64_t stream = row_index / n_kv;
+        const uint64_t kv = row_index % n_kv;
+        const auto * packed = static_cast<const uint8_t *>(src->data) + stream * src->nb[2] + kv * src->nb[1];
+        for (uint32_t head = 0; head < state.n_head; ++head) {
+            for (uint32_t channel = 0; channel < state.head_dim; ++channel) {
+                const uint8_t code = tq_residual_unpack4(packed, head * state.head_dim + channel);
+                const uint8_t main_code = code & 0x07u;
+                GGML_ASSERT(main_code != 0x04u);
+                const int q = main_code >= 4u ? static_cast<int>(main_code) - 8 : static_cast<int>(main_code);
+                const uint8_t selector = (code >> 3) & 1u;
+                const uint8_t minus_bit = tq_residual_minus_bit(main_code, selector);
+                main[channel] = q * state.scales[0];
+                plus[channel] = selector ? state.scales[1] : -state.scales[1];
+                minus[channel] = minus_bit ? state.scales[2] : -state.scales[2];
+            }
+            tq_residual_rotate(state.rotations[0], main.data(), main_inv.data(), state.head_dim, true);
+            tq_residual_rotate(state.rotations[1], plus.data(), plus_inv.data(), state.head_dim, true);
+            tq_residual_rotate(state.rotations[2], minus.data(), minus_inv.data(), state.head_dim, true);
+            auto * output = reinterpret_cast<float *>(
+                static_cast<uint8_t *>(dst->data) + stream * dst->nb[3] + kv * dst->nb[2] + head * dst->nb[1]);
+            for (uint32_t channel = 0; channel < state.head_dim; ++channel) {
+                output[channel] = main_inv[channel] + state.beta[0] * plus_inv[channel] + state.beta[1] * minus_inv[channel];
+            }
+        }
+    }
+}
+
+void llama_kv_cache::residual_store_rows_op(
+        ggml_tensor * dst,
+  const ggml_tensor * cache,
+  const ggml_tensor * encoded,
+  const ggml_tensor * indices,
+                int   ith,
+                int   nth,
+             void *   userdata) {
+    GGML_UNUSED(userdata);
+    GGML_UNUSED(ith);
+    GGML_UNUSED(nth);
+    GGML_ASSERT(dst->type == GGML_TYPE_I8 && cache->type == GGML_TYPE_I8 && encoded->type == GGML_TYPE_I8);
+    GGML_ASSERT(indices->type == GGML_TYPE_I32 || indices->type == GGML_TYPE_I64);
+    GGML_ASSERT(dst->data == cache->data);
+    GGML_ASSERT(dst->ne[0] == cache->ne[0] && dst->ne[1] == cache->ne[1]);
+    GGML_ASSERT(encoded->ne[0] == dst->ne[0]);
+    GGML_ASSERT(indices->ne[0] == encoded->ne[1]);
+
+    const int64_t n_rows = encoded->ne[1];
+    for (int64_t row = 0; row < n_rows; ++row) {
+        const int64_t index = indices->type == GGML_TYPE_I32
+            ? static_cast<const int32_t *>(indices->data)[row]
+            : static_cast<const int64_t *>(indices->data)[row];
+        GGML_ASSERT(index >= 0 && index < dst->ne[1]);
+        memcpy(
+            static_cast<uint8_t *>(dst->data) + static_cast<size_t>(index) * dst->nb[1],
+            static_cast<const uint8_t *>(encoded->data) + static_cast<size_t>(row) * encoded->nb[1],
+            static_cast<size_t>(encoded->ne[0]));
+    }
+}
+
 // orthonormal Walsh-Hadamard rotation matrix
 // note: res^2 == I
 static void ggml_gen_hadamard(ggml_tensor * tensor) {
@@ -117,12 +335,22 @@ llama_kv_cache::llama_kv_cache(
            llama_memory_t   mem_other,
     const layer_filter_cb & filter,
     const  layer_reuse_cb & reuse,
-    const  layer_share_cb & share) :
+    const  layer_share_cb & share,
+                 uint32_t   tq_view_capacity,
+       llama_tq_execution   tq_execution) :
     model(model), hparams(hparams), v_trans(v_trans),
-    n_seq_max(n_seq_max), n_stream(unified ? 1 : n_seq_max), n_pad(n_pad), n_swa(n_swa), swa_type(swa_type),
+    n_seq_max(n_seq_max), n_stream(unified ? 1 : n_seq_max), n_pad(n_pad), n_swa(n_swa), tq_view_capacity(tq_view_capacity), tq_execution(tq_execution), swa_type(swa_type),
     other(static_cast<llama_kv_cache *>(mem_other)),
     v_cells_impl(other ? other->v_cells_impl : std::make_shared<llama_kv_cells_vec>()),
     v_cells(*v_cells_impl) {
+
+    if (tq_view_capacity != 1 && tq_view_capacity != 3) {
+        throw std::invalid_argument("llama_kv_cache: tq_view_capacity must be 1 or 3");
+    }
+
+    if (other && tq_view_capacity != other->tq_view_capacity) {
+        throw std::invalid_argument("llama_kv_cache: shared caches must use the same tq_view_capacity");
+    }
 
     // shared cells view the source cache's K/V tensors, so the cell count
     // follows the source allocation: a fitted target can be smaller than the
@@ -179,7 +407,8 @@ llama_kv_cache::llama_kv_cache(
         if (it == ctx_map.end()) {
             ggml_init_params params = {
                 // +3 for turbo rotation matrices (turbo_rotation + turbo_rotation_inv + turbo_innerq_scale_inv)
-                /*.mem_size   =*/ size_t((2u*(1 + n_stream)*n_layer + 3)*ggml_tensor_overhead()),
+                /*.mem_size   =*/ size_t(((tq_view_capacity + 1u)*(1 + n_stream)*n_layer +
+                    (tq_execution == LLAMA_TQ_EXEC_RESIDUAL_PARITY ? n_layer : 0u) + 3)*ggml_tensor_overhead()),
                 /*.mem_buffer =*/ NULL,
                 /*.no_alloc   =*/ true,
             };
@@ -362,6 +591,69 @@ llama_kv_cache::llama_kv_cache(
                 }
             }
         }
+        std::shared_ptr<residual_layer_state> residual;
+        if (tq_execution == LLAMA_TQ_EXEC_RESIDUAL_PARITY) {
+            const auto & residual_metadata = model.turboquant_metadata.residual_parity.layers.at(il);
+            residual = std::make_shared<residual_layer_state>();
+            residual->logical_channels = n_embd_k_gqa;
+            residual->row_bytes =
+                (n_embd_k_gqa * TQ_RESIDUAL_PHYSICAL_BITS_PER_CHANNEL + 7u) / 8u;
+            residual->head_dim = n_embd_head_k;
+            residual->n_head = hparams.n_head_kv(il);
+            residual->scales = residual_metadata.fixed_sector_scales;
+            residual->beta = residual_metadata.beta;
+            const uint64_t physical_rows = static_cast<uint64_t>(kv_size) * n_stream;
+            const uint64_t actual_bits =
+                (physical_rows * residual->row_bytes + TQ_RESIDUAL_CONTROLLER_BYTES) * 8u;
+            const uint64_t target_bits = physical_rows * residual->logical_channels *
+                TQ_RESIDUAL_LOGICAL_BITS_PER_CHANNEL;
+            if (actual_bits > target_bits) {
+                throw std::runtime_error(
+                    "residual-parity physical K storage exceeds the controller-inclusive five-bit budget");
+            }
+            for (uint32_t view = 0; view < 3; ++view) {
+                auto * rotation = model.turboquant_rotation(il, view);
+                if (!rotation || rotation->type != GGML_TYPE_F32 ||
+                    rotation->ne[0] != n_embd_head_k || rotation->ne[1] != n_embd_head_k || !rotation->buffer) {
+                    throw std::runtime_error("residual-parity requires loaded F32 per-head rotations");
+                }
+                residual->rotations[view].resize(static_cast<size_t>(n_embd_head_k) * n_embd_head_k);
+                ggml_backend_tensor_get(rotation, residual->rotations[view].data(), 0,
+                    residual->rotations[view].size() * sizeof(float));
+            }
+            auto write_u32 = [&](size_t & offset, uint32_t value) {
+                for (uint32_t byte = 0; byte < 4; ++byte) {
+                    residual->controller[offset++] = static_cast<uint8_t>(value >> (byte * 8));
+                }
+            };
+            auto write_f32 = [&](size_t & offset, float value) {
+                uint32_t bits;
+                static_assert(sizeof(bits) == sizeof(value));
+                std::memcpy(&bits, &value, sizeof(bits));
+                write_u32(offset, bits);
+            };
+            size_t controller_offset = 0;
+            residual->controller[controller_offset++] = 'T';
+            residual->controller[controller_offset++] = 'Q';
+            residual->controller[controller_offset++] = 'R';
+            residual->controller[controller_offset++] = 'P';
+            write_u32(controller_offset, LLAMA_KV_STATE_RESIDUAL_VERSION);
+            write_u32(controller_offset, residual->logical_channels);
+            write_u32(controller_offset, residual->row_bytes);
+            residual->controller[controller_offset++] = 3u;
+            residual->controller[controller_offset++] = 1u;
+            residual->controller[controller_offset++] = 1u;
+            residual->controller[controller_offset++] = TQ_RESIDUAL_PARITY_COUPLED_LAYOUT;
+            for (float value : residual->scales) {
+                write_f32(controller_offset, value);
+            }
+            for (float value : residual->beta) {
+                write_f32(controller_offset, value);
+            }
+            write_u32(controller_offset, TQ_RESIDUAL_LOGICAL_BITS_PER_CHANNEL * 1000u);
+            GGML_ASSERT(controller_offset == 44u);
+            layer_type_k = GGML_TYPE_I8;
+        }
         // For turbo types, pad K head_dim to next multiple of 128 for full WHT groups
         uint32_t n_embd_k_gqa_eff = n_embd_k_gqa;
         const bool k_is_turbo = (layer_type_k == GGML_TYPE_TURBO3_0 || layer_type_k == GGML_TYPE_TURBO4_0 || layer_type_k == GGML_TYPE_TURBO2_0);
@@ -373,6 +665,9 @@ llama_kv_cache::llama_kv_cache(
                 LLAMA_LOG_INFO("%s: turbo zero-padding K head_dim %u -> %u (cache %u -> %u)\n",
                                __func__, n_embd_head_k, padded_head_k, n_embd_k_gqa, n_embd_k_gqa_eff);
             }
+        }
+        if (residual) {
+            n_embd_k_gqa_eff = residual->row_bytes;
         }
 
         // For turbo types, pad V head_dim to next multiple of 128 if needed
@@ -389,23 +684,52 @@ llama_kv_cache::llama_kv_cache(
             }
         }
 
-        ggml_tensor * k = has_k ? ggml_new_tensor_3d(ctx, layer_type_k, n_embd_k_gqa_eff, kv_size, n_stream) : nullptr;
+        std::array<ggml_tensor *, 3> k_views = {};
+        for (uint32_t view = 0; view < tq_view_capacity; ++view) {
+            k_views[view] = has_k ? ggml_new_tensor_3d(ctx, layer_type_k, n_embd_k_gqa_eff, kv_size, n_stream) : nullptr;
+            if (has_k) {
+                if (view == 0) {
+                    ggml_format_name(k_views[view], "cache_k_l%d", il);
+                } else {
+                    ggml_format_name(k_views[view], "cache_k_l%d_v%u", il, view);
+                }
+            }
+        }
+        ggml_tensor * k = k_views[0];
+        ggml_tensor * residual_controller = residual ?
+            ggml_new_tensor_1d(ctx, GGML_TYPE_I8, TQ_RESIDUAL_CONTROLLER_BYTES) : nullptr;
         ggml_tensor * v = has_v ? ggml_new_tensor_3d(ctx, layer_type_v, n_embd_v_gqa_eff, kv_size, n_stream) : nullptr;
 
-        has_k && ggml_format_name(k, "cache_k_l%d", il);
+        residual_controller && ggml_format_name(residual_controller, "cache_k_residual_controller_l%d", il);
         has_v && ggml_format_name(v, "cache_v_l%d", il);
 
         std::vector<ggml_tensor *> k_stream;
         std::vector<ggml_tensor *> v_stream;
+        std::array<std::vector<ggml_tensor *>, 3> k_stream_views;
 
         for (uint32_t s = 0; s < n_stream; ++s) {
-            k_stream.push_back(has_k ? ggml_view_2d(ctx, k, n_embd_k_gqa_eff, kv_size, k->nb[1], s*k->nb[2]) : nullptr);
+            for (uint32_t view = 0; view < tq_view_capacity; ++view) {
+                auto * k_view = k_views[view];
+                k_stream_views[view].push_back(has_k ? ggml_view_2d(ctx, k_view, n_embd_k_gqa_eff, kv_size, k_view->nb[1], s*k_view->nb[2]) : nullptr);
+            }
             v_stream.push_back(has_v ? ggml_view_2d(ctx, v, n_embd_v_gqa_eff, kv_size, v->nb[1], s*v->nb[2]) : nullptr);
         }
 
+        k_stream = k_stream_views[0];
+
         map_layer_ids[il] = layers.size();
 
-        layers.push_back({ il, k, v, k_stream, v_stream, });
+        kv_layer layer;
+        layer.il = il;
+        layer.k = k;
+        layer.v = v;
+        layer.k_stream = std::move(k_stream);
+        layer.v_stream = std::move(v_stream);
+        layer.k_views = k_views;
+        layer.k_stream_views = std::move(k_stream_views);
+        layer.residual = std::move(residual);
+        layer.residual_controller = residual_controller;
+        layers.push_back(std::move(layer));
 
         // TurboQuant: create rotation matrix tensors (once, shared across layers)
         if (turbo_rotation == nullptr &&
@@ -463,6 +787,12 @@ llama_kv_cache::llama_kv_cache(
         LLAMA_LOG_INFO("%s: %10s KV buffer size = %8.2f MiB\n", __func__, ggml_backend_buffer_name(buf), ggml_backend_buffer_get_size(buf)/1024.0/1024.0);
 
         ggml_backend_buffer_clear(buf, 0);
+
+        for (const auto & layer : layers) {
+            if (layer.residual && layer.residual_controller && layer.residual_controller->buffer == buf && !model.hparams.no_alloc) {
+                ggml_backend_tensor_set(layer.residual_controller, layer.residual->controller.data(), 0, layer.residual->controller.size());
+            }
+        }
 
         // Fill turbo rotation matrices AFTER buffer clear (clear zeroes everything)
         if (turbo_rotation != nullptr && turbo_rotation->buffer != nullptr && !model.hparams.no_alloc) {
@@ -547,6 +877,9 @@ llama_kv_cache::llama_kv_cache(
                 hparams.n_embd_head_v() % 64 == 0;
         }
     }
+    if (tq_execution == LLAMA_TQ_EXEC_RESIDUAL_PARITY) {
+        attn_rot_k = false;
+    }
     LLAMA_LOG_INFO("%s: attn_rot_k = %d, n_embd_head_k_all = %d\n", __func__, attn_rot_k, n_embd_head_k_all);
     LLAMA_LOG_INFO("%s: attn_rot_v = %d, n_embd_head_k_all = %d\n", __func__, attn_rot_v, n_embd_head_v_all);
 
@@ -596,6 +929,12 @@ void llama_kv_cache::clear(bool data) {
     if (data) {
         for (auto & [_, buf] : ctxs_bufs) {
             ggml_backend_buffer_clear(buf.get(), 0);
+        }
+
+        for (const auto & layer : layers) {
+            if (layer.residual && layer.residual_controller && layer.residual_controller->buffer) {
+                ggml_backend_tensor_set(layer.residual_controller, layer.residual->controller.data(), 0, layer.residual->controller.size());
+            }
         }
 
         // Re-initialize turbo rotation matrices after buffer clear (clear zeroes everything)
@@ -1079,7 +1418,9 @@ bool llama_kv_cache::update(llama_context * lctx, bool do_shift, const stream_co
             for (uint32_t il = 0; il < layers.size(); ++il) {
                 const auto & layer = layers[il];
 
-                ggml_backend_tensor_copy(layer.k_stream[ssrc], layer.k_stream[sdst]);
+                for (uint32_t view = 0; view < tq_view_capacity; ++view) {
+                    ggml_backend_tensor_copy(layer.k_stream_views[view][ssrc], layer.k_stream_views[view][sdst]);
+                }
 
                 if (layer.v_stream[ssrc]) {
                     ggml_backend_tensor_copy(layer.v_stream[ssrc], layer.v_stream[sdst]);
@@ -1476,9 +1817,28 @@ uint32_t llama_kv_cache::get_n_kv(const slot_info & sinfo) const {
 }
 
 ggml_tensor * llama_kv_cache::get_k(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const {
+    return get_k(ctx, il, n_kv, sinfo, 0);
+}
+
+ggml_tensor * llama_kv_cache::get_k(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo, uint32_t view) const {
+    GGML_ASSERT(view < tq_view_capacity);
+
     const int32_t ikv = map_layer_ids.at(il);
 
-    auto * k = layers[ikv].k;
+    const auto & layer = layers[ikv];
+    if (layer.residual) {
+        GGML_ASSERT(view == 0);
+        auto * k = layer.k_views[0];
+        const uint32_t ns = sinfo.s1 - sinfo.s0 + 1;
+        ggml_tensor * packed = ggml_view_3d(ctx, k,
+            layer.residual->row_bytes, n_kv, ns,
+            k->nb[1], k->nb[2], k->nb[2] * sinfo.s0);
+        ggml_tensor * seed = ggml_new_tensor_4d(ctx, GGML_TYPE_F32,
+            layer.residual->head_dim, layer.residual->n_head, n_kv, ns);
+        return ggml_map_custom2(ctx, seed, packed, residual_decode_op, 1, layer.residual.get());
+    }
+
+    auto * k = layer.k_views[view];
 
     const uint64_t kv_size      = get_size();
     const uint64_t n_embd_k_gqa = k->ne[0];
@@ -1545,11 +1905,29 @@ ggml_tensor * llama_kv_cache::get_v(ggml_context * ctx, int32_t il, uint32_t n_k
 }
 
 ggml_tensor * llama_kv_cache::cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il, const slot_info & sinfo) const {
+    return cpy_k(ctx, k_cur, k_idxs, il, sinfo, 0);
+}
+
+ggml_tensor * llama_kv_cache::cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il, const slot_info & sinfo, uint32_t view) const {
     GGML_UNUSED(sinfo);
+    GGML_ASSERT(view < tq_view_capacity);
 
     const int32_t ikv = map_layer_ids.at(il);
 
-    ggml_tensor * k = layers[ikv].k;
+    const auto & layer = layers[ikv];
+    if (layer.residual) {
+        GGML_ASSERT(view == 0 && k_cur->type == GGML_TYPE_F32);
+        GGML_ASSERT(k_cur->ne[0] == layer.residual->head_dim && k_cur->ne[1] == layer.residual->n_head);
+        ggml_tensor * seed = ggml_new_tensor_2d(ctx, GGML_TYPE_I8, layer.residual->row_bytes, k_cur->ne[2]);
+        ggml_tensor * encoded = ggml_map_custom2(ctx, seed, k_cur, residual_encode_op, 1, layer.residual.get());
+        ggml_tensor * k = layer.k_views[0];
+        if (k->ne[2] > 1) {
+            k = ggml_reshape_2d(ctx, k, layer.residual->row_bytes, get_size() * k->ne[2]);
+        }
+        return ggml_map_custom3_inplace(ctx, k, encoded, k_idxs, residual_store_rows_op, 1, nullptr);
+    }
+
+    ggml_tensor * k = layer.k_views[view];
 
     int64_t n_embd_head = k_cur->ne[0];
     const int64_t n_head      = k_cur->ne[1];
@@ -2107,6 +2485,46 @@ void llama_kv_cache::set_input_v_rot(ggml_tensor * dst) const {
     memcpy(dst->data, attn_rot_hadamard.at(n_rot).data(), ggml_nbytes(dst));
 }
 
+bool llama_kv_cache::tq_get_residual_storage_info(uint32_t il, tq_residual_storage_info & info) const {
+    info = {};
+    const auto it = std::find_if(layers.begin(), layers.end(),
+        [il](const kv_layer & layer) { return layer.il == il; });
+    if (it == layers.end() || !it->residual || !it->residual_controller || !it->k_views[0]) {
+        return false;
+    }
+    for (const ggml_tensor * view : it->k_views) {
+        info.physical_view_count += view != nullptr ? 1u : 0u;
+    }
+    info.logical_channels = it->residual->logical_channels;
+    info.row_bytes = it->residual->row_bytes;
+    info.physical_payload_bytes = ggml_nbytes(it->k_views[0]);
+    info.controller_bytes = ggml_nbytes(it->residual_controller);
+    const size_t row_count = ggml_nrows(it->k_views[0]);
+    const double logical_values = static_cast<double>(row_count) * info.logical_channels;
+    info.logical_payload_bits_per_channel = TQ_RESIDUAL_LOGICAL_BITS_PER_CHANNEL;
+    info.physical_payload_bits_per_channel =
+        static_cast<double>(info.physical_payload_bytes) * 8.0 / logical_values;
+    info.actual_bits_per_channel =
+        static_cast<double>(info.physical_payload_bytes + info.controller_bytes) * 8.0 / logical_values;
+    info.five_bit_target_met = info.actual_bits_per_channel <= TQ_RESIDUAL_LOGICAL_BITS_PER_CHANNEL;
+
+    std::array<uint8_t, TQ_RESIDUAL_CONTROLLER_BYTES> controller{};
+    ggml_backend_tensor_get(it->residual_controller, controller.data(), 0, controller.size());
+    info.controller_reserved_zero = std::all_of(controller.begin() + 44, controller.end(),
+        [](uint8_t value) { return value == 0; });
+
+    std::vector<uint8_t> row(info.row_bytes);
+    info.rows_canonical = true;
+    for (size_t index = 0; index < row_count; ++index) {
+        ggml_backend_tensor_get(it->k_views[0], row.data(), index * info.row_bytes, row.size());
+        if (!tq_residual_row_valid(row.data(), info.logical_channels, info.row_bytes)) {
+            info.rows_canonical = false;
+            break;
+        }
+    }
+    return true;
+}
+
 size_t llama_kv_cache::total_size() const {
     size_t size = 0;
 
@@ -2121,7 +2539,12 @@ size_t llama_kv_cache::size_k_bytes() const {
     size_t size_k_bytes = 0;
 
     for (const auto & layer : layers) {
-        size_k_bytes += ggml_nbytes(layer.k);
+        for (uint32_t view = 0; view < tq_view_capacity; ++view) {
+            size_k_bytes += ggml_nbytes(layer.k_views[view]);
+        }
+        if (layer.residual_controller) {
+            size_k_bytes += ggml_nbytes(layer.residual_controller);
+        }
     }
 
     return size_k_bytes;
@@ -2143,6 +2566,7 @@ ggml_tensor * llama_kv_cache::build_rope_shift(
                 ggml_tensor * cur,
                 ggml_tensor * shift,
                 ggml_tensor * rot,
+                ggml_tensor * tq_rot,
                 ggml_tensor * factors,
                       float   freq_base,
                       float   freq_scale,
@@ -2168,16 +2592,50 @@ ggml_tensor * llama_kv_cache::build_rope_shift(
         // dequantize to f32 -> RoPE -> quantize back
         tmp = ggml_cast(ctx, cur, GGML_TYPE_F32);
 
-        // rotate back
-        tmp = ggml_mul_mat_aux(ctx, tmp, rot);
+        const bool is_turbo = cur->type == GGML_TYPE_TURBO2_0 ||
+            cur->type == GGML_TYPE_TURBO3_0 || cur->type == GGML_TYPE_TURBO4_0;
+        if (is_turbo) {
+            tmp = ggml_turbo_wht(ctx, tmp, 1, 128, turbo_innerq_scale_inv);
+        } else {
+            tmp = ggml_mul_mat_aux(ctx, tmp, rot);
+        }
+
+        const int64_t n_embd_head_k = hparams.n_embd_head_k(il);
+        const int64_t pad = cur->ne[0] - n_embd_head_k;
+        if (pad > 0) {
+            tmp = ggml_view_3d(ctx, tmp, n_embd_head_k, tmp->ne[1], tmp->ne[2], tmp->nb[1], tmp->nb[2], 0);
+        }
+
+        if (tq_rot) {
+            tmp = ggml_mul_mat(ctx, ggml_cont(ctx, ggml_transpose(ctx, tq_rot)), tmp);
+        }
 
         tmp = ggml_rope_ext(ctx, tmp,
                 shift, factors, n_rot, rope_type, n_ctx_orig, freq_base, freq_scale,
                 yarn_ext_factor, yarn_attn_factor, yarn_beta_fast, yarn_beta_slow);
 
-        // rotate fwd
-        tmp = ggml_mul_mat_aux(ctx, tmp, rot);
+        if (tq_rot) {
+            tmp = ggml_mul_mat(ctx, tq_rot, tmp);
+        }
 
+        if (pad > 0) {
+            tmp = ggml_pad(ctx, tmp, pad, 0, 0, 0);
+        }
+
+        if (is_turbo) {
+            tmp = ggml_turbo_wht(ctx, tmp, 0, 128, turbo_innerq_scale_inv);
+        } else {
+            tmp = ggml_mul_mat_aux(ctx, tmp, rot);
+        }
+
+        tmp = ggml_cpy(ctx, tmp, cur);
+    } else if (tq_rot) {
+        tmp = ggml_cast(ctx, cur, GGML_TYPE_F32);
+        tmp = ggml_mul_mat(ctx, ggml_cont(ctx, ggml_transpose(ctx, tq_rot)), tmp);
+        tmp = ggml_rope_ext(ctx, tmp,
+                shift, factors, n_rot, rope_type, n_ctx_orig, freq_base, freq_scale,
+                yarn_ext_factor, yarn_attn_factor, yarn_beta_fast, yarn_beta_slow);
+        tmp = ggml_mul_mat(ctx, tq_rot, tmp);
         tmp = ggml_cpy(ctx, tmp, cur);
     } else {
         // we rotate only the first n_rot dimensions
@@ -2231,12 +2689,12 @@ ggml_cgraph * llama_kv_cache::build_graph_shift(llm_graph_result * res, llama_co
     inp->k_rot = build_input_k_rot(ctx);
 
     const auto & cparams = lctx->get_cparams();
+    const auto * tq_config = lctx->get_turboquant_config();
 
     for (const auto & layer : layers) {
         const uint32_t il = layer.il;
 
-        const int64_t n_head_kv    = hparams.n_head_kv(il);
-        const int64_t n_embd_k_gqa = hparams.n_embd_k_gqa(il);
+        const int64_t n_head_kv = hparams.n_head_kv(il);
 
         const auto n_rot         = hparams.n_rot(il);
         const auto n_embd_head_k = hparams.n_embd_head_k(il);
@@ -2247,16 +2705,66 @@ ggml_cgraph * llama_kv_cache::build_graph_shift(llm_graph_result * res, llama_co
 
         ggml_tensor * rope_factors = model.get_rope_factors(cparams, il);
 
-        ggml_tensor * k =
-            ggml_view_3d(ctx, layer.k,
-                n_rot, n_head_kv, get_size()*n_stream,
-                ggml_row_size(layer.k->type, n_embd_head_k),
-                ggml_row_size(layer.k->type, n_embd_k_gqa),
-                ggml_row_size(layer.k->type, n_embd_nope));
+        if (layer.residual) {
+            const int64_t n_rows = static_cast<int64_t>(get_size()) * n_stream;
+            ggml_tensor * packed = ggml_reshape_2d(ctx, layer.k_views[0], layer.residual->row_bytes, n_rows);
+            ggml_tensor * decode_seed = ggml_new_tensor_3d(ctx, GGML_TYPE_F32,
+                layer.residual->head_dim, layer.residual->n_head, n_rows);
+            ggml_tensor * decoded = ggml_map_custom2(
+                ctx, decode_seed, packed, residual_decode_op, 1, layer.residual.get());
+            ggml_tensor * shifted = build_rope_shift(
+                cparams, ctx, decoded, inp->k_shift, inp->k_rot, nullptr,
+                rope_factors, freq_base_l, freq_scale_l, il);
+            ggml_tensor * encode_seed = ggml_new_tensor_2d(ctx, GGML_TYPE_I8, layer.residual->row_bytes, n_rows);
+            ggml_tensor * encoded = ggml_map_custom2(
+                ctx, encode_seed, shifted, residual_encode_op, 1, layer.residual.get());
+            ggml_build_forward_expand(gf, ggml_cpy(ctx, encoded, packed));
+            continue;
+        }
 
-        ggml_tensor * cur = build_rope_shift(cparams, ctx, k, inp->k_shift, inp->k_rot, rope_factors, freq_base_l, freq_scale_l, il);
+        const bool tq_attention_consensus = tq_config &&
+            tq_config->execution == LLAMA_TQ_EXEC_ATTENTION_LOGIT_CONSENSUS;
+        const uint32_t views_to_shift = tq_attention_consensus ? tq_view_capacity : 1u;
+        uint32_t selected_view = 0;
+        if (tq_config && !tq_attention_consensus && layer.il < tq_config->layers.size()) {
+            const auto & tq_layer = tq_config->layers[layer.il];
+            float selected_error = std::numeric_limits<float>::infinity();
+            for (uint32_t branch = 0; branch < 3; ++branch) {
+                if ((tq_layer.active_mask & (uint8_t(1) << branch)) == 0) {
+                    continue;
+                }
+                if (tq_config->execution == LLAMA_TQ_EXEC_SINGLE_VIEW ||
+                    tq_layer.branches[branch].expected_error < selected_error) {
+                    selected_view = static_cast<uint32_t>(tq_layer.branches[branch].view);
+                    selected_error = tq_layer.branches[branch].expected_error;
+                    if (tq_config->execution == LLAMA_TQ_EXEC_SINGLE_VIEW) {
+                        break;
+                    }
+                }
+            }
+        }
 
-        ggml_build_forward_expand(gf, cur);
+        for (uint32_t view = 0; view < views_to_shift; ++view) {
+            auto * k_storage = layer.k_views[view];
+            const bool k_is_turbo = k_storage->type == GGML_TYPE_TURBO2_0 ||
+                k_storage->type == GGML_TYPE_TURBO3_0 || k_storage->type == GGML_TYPE_TURBO4_0;
+            const int64_t n_embd_head_eff = k_is_turbo && n_embd_head_k % 128 != 0
+                ? ((n_embd_head_k + 127) / 128) * 128 : n_embd_head_k;
+            const int64_t n_embd_k_gqa_eff = n_embd_head_eff * n_head_kv;
+            ggml_tensor * k =
+                ggml_view_3d(ctx, k_storage,
+                    k_is_turbo ? n_embd_head_eff : n_rot, n_head_kv, get_size()*n_stream,
+                    ggml_row_size(k_storage->type, n_embd_head_eff),
+                    ggml_row_size(k_storage->type, n_embd_k_gqa_eff),
+                    k_is_turbo ? 0 : ggml_row_size(k_storage->type, n_embd_nope));
+            ggml_tensor * cur = build_rope_shift(
+                cparams, ctx, k, inp->k_shift, inp->k_rot,
+                tq_attention_consensus ? model.turboquant_rotation(il, view) :
+                    (tq_config ? model.turboquant_rotation(il, selected_view) : nullptr),
+                rope_factors, freq_base_l, freq_scale_l, il);
+
+            ggml_build_forward_expand(gf, cur);
+        }
     }
 
     res->add_input(std::move(inp));
@@ -2419,36 +2927,45 @@ void llama_kv_cache::state_write_data(llama_io_write_i & io, const cell_ranges_t
     io.write(&v_trans, sizeof(v_trans));
     io.write(&n_layer, sizeof(n_layer));
 
+    if (tq_execution == LLAMA_TQ_EXEC_RESIDUAL_PARITY) {
+        const uint32_t marker = LLAMA_KV_STATE_RESIDUAL_MARKER;
+        const uint32_t version = LLAMA_KV_STATE_RESIDUAL_VERSION;
+        const uint32_t controller_bytes = TQ_RESIDUAL_CONTROLLER_BYTES;
+        io.write(&marker, sizeof(marker));
+        io.write(&version, sizeof(version));
+        io.write(&controller_bytes, sizeof(controller_bytes));
+        for (const auto & layer : layers) {
+            io.write(layer.residual->controller.data(), layer.residual->controller.size());
+        }
+    } else if (tq_view_capacity == 3) {
+        const uint32_t k_view_marker = LLAMA_KV_STATE_K_VIEW_MARKER;
+        io.write(&k_view_marker, sizeof(k_view_marker));
+        io.write(&tq_view_capacity, sizeof(tq_view_capacity));
+    }
+
     // Iterate and write all the keys first, each row is a cell
     // Get whole range at a time
     for (const auto & layer : layers) {
-        const uint32_t il = layer.il;
+        for (uint32_t view = 0; view < tq_view_capacity; ++view) {
+            auto * k = layer.k_stream_views[view][cr.strm];
 
-        auto * k = layer.k_stream[cr.strm];
+            const uint32_t n_embd_k_gqa = (uint32_t) k->ne[0];
+            const int32_t k_type_i = (int32_t) k->type;
+            io.write(&k_type_i, sizeof(k_type_i));
 
-        // Use actual tensor width (may be padded for turbo types: e.g. 576→640)
-        const uint32_t n_embd_k_gqa = (uint32_t) k->ne[0];
+            const uint64_t k_size_row = ggml_row_size(k->type, n_embd_k_gqa);
+            io.write(&k_size_row, sizeof(k_size_row));
 
-        // Write key type
-        const int32_t k_type_i = (int32_t) k->type;
-        io.write(&k_type_i, sizeof(k_type_i));
-
-        // Write row size of key
-        const uint64_t k_size_row = ggml_row_size(k->type, n_embd_k_gqa);
-        io.write(&k_size_row, sizeof(k_size_row));
-
-        // Read each range of cells of k_size length and write out
-        for (const auto & range : cr.data) {
-            const size_t range_size = range.second - range.first;
-            const size_t buf_size = range_size * k_size_row;
-            io.write_tensor(k, range.first * k_size_row, buf_size);
+            for (const auto & range : cr.data) {
+                const size_t range_size = range.second - range.first;
+                const size_t buf_size = range_size * k_size_row;
+                io.write_tensor(k, range.first * k_size_row, buf_size);
+            }
         }
     }
 
     if (!v_trans) {
         for (const auto & layer : layers) {
-            const uint32_t il = layer.il;
-
             auto * v = layer.v_stream[cr.strm];
             if (!v) {
                 continue;
@@ -2644,6 +3161,40 @@ bool llama_kv_cache::state_read_data(llama_io_read_i & io, uint32_t strm, uint32
         return false;
     }
 
+    if (tq_execution == LLAMA_TQ_EXEC_RESIDUAL_PARITY) {
+        uint32_t marker;
+        uint32_t version;
+        uint32_t controller_bytes;
+        io.read(&marker, sizeof(marker));
+        io.read(&version, sizeof(version));
+        io.read(&controller_bytes, sizeof(controller_bytes));
+        if (marker != LLAMA_KV_STATE_RESIDUAL_MARKER || version != LLAMA_KV_STATE_RESIDUAL_VERSION ||
+            controller_bytes != TQ_RESIDUAL_CONTROLLER_BYTES) {
+            LLAMA_LOG_ERROR("%s: incompatible residual-parity state marker/version/controller size\n", __func__);
+            return false;
+        }
+        for (const auto & layer : layers) {
+            std::array<uint8_t, TQ_RESIDUAL_CONTROLLER_BYTES> controller{};
+            io.read(controller.data(), controller.size());
+            if (controller != layer.residual->controller) {
+                LLAMA_LOG_ERROR("%s: residual-parity controller differs from model metadata at layer %u\n", __func__, layer.il);
+                return false;
+            }
+            ggml_backend_tensor_set(layer.residual_controller, controller.data(), 0, controller.size());
+        }
+    } else if (tq_view_capacity == 3) {
+        uint32_t k_view_marker;
+        uint32_t stored_view_capacity;
+        io.read(&k_view_marker, sizeof(k_view_marker));
+        io.read(&stored_view_capacity, sizeof(stored_view_capacity));
+
+        if (k_view_marker != LLAMA_KV_STATE_K_VIEW_MARKER || stored_view_capacity != tq_view_capacity) {
+            LLAMA_LOG_ERROR("%s: mismatched K view capacity marker (marker 0x%08x, views %u instead of %u)\n",
+                    __func__, k_view_marker, stored_view_capacity, tq_view_capacity);
+            return false;
+        }
+    }
+
     if (cell_count > cells.size()) {
         LLAMA_LOG_ERROR("%s: not enough cells in kv cache to restore state (%u > %u)\n", __func__, cell_count, cells.size());
         return false;
@@ -2658,38 +3209,55 @@ bool llama_kv_cache::state_read_data(llama_io_read_i & io, uint32_t strm, uint32
     for (const auto & layer : layers) {
         const uint32_t il = layer.il;
 
-        auto * k = layer.k_stream[strm];
+        for (uint32_t view = 0; view < tq_view_capacity; ++view) {
+            auto * k = layer.k_stream_views[view][strm];
 
-        // Use actual tensor width (may be padded for turbo types)
-        const uint32_t n_embd_k_gqa = (uint32_t) k->ne[0];
+            const uint32_t n_embd_k_gqa = (uint32_t) k->ne[0];
+            int32_t k_type_i_ref;
+            io.read(&k_type_i_ref, sizeof(k_type_i_ref));
 
-        // Read type of key
-        int32_t k_type_i_ref;
-        io.read(&k_type_i_ref, sizeof(k_type_i_ref));
-        const int32_t k_type_i = (int32_t) k->type;
-        if (k_type_i != k_type_i_ref) {
-            LLAMA_LOG_ERROR("%s: mismatched key type (%d != %d, layer %d)\n", __func__, k_type_i, k_type_i_ref, il);
-            return false;
-        }
+            if (tq_view_capacity == 1 && ((uint32_t) k_type_i_ref == LLAMA_KV_STATE_K_VIEW_MARKER ||
+                (uint32_t) k_type_i_ref == LLAMA_KV_STATE_RESIDUAL_MARKER)) {
+                uint32_t stored_view_capacity;
+                io.read(&stored_view_capacity, sizeof(stored_view_capacity));
+                LLAMA_LOG_ERROR("%s: mismatched K view capacity (%u instead of %u)\n", __func__, stored_view_capacity, tq_view_capacity);
+                return false;
+            }
 
-        // Read row size of key
-        uint64_t k_size_row_ref;
-        io.read(&k_size_row_ref, sizeof(k_size_row_ref));
-        const size_t k_size_row = ggml_row_size(k->type, n_embd_k_gqa);
-        if (k_size_row != k_size_row_ref) {
-            LLAMA_LOG_ERROR("%s: mismatched key row size (%zu != %zu, layer %d)\n", __func__, k_size_row, (size_t) k_size_row_ref, il);
-            return false;
-        }
+            const int32_t k_type_i = (int32_t) k->type;
+            if (k_type_i != k_type_i_ref) {
+                LLAMA_LOG_ERROR("%s: mismatched key type (%d != %d, layer %d, view %u)\n", __func__, k_type_i, k_type_i_ref, il, view);
+                return false;
+            }
 
-        if (cell_count) {
-            if (sinfo.is_contiguous()) {
-                // Fast path: contiguous cells, single memcpy
-                io.read_tensor(k, sinfo.head() * k_size_row, cell_count * k_size_row);
-            } else {
-                // Slow path: scatter to non-contiguous positions
+            uint64_t k_size_row_ref;
+            io.read(&k_size_row_ref, sizeof(k_size_row_ref));
+            const size_t k_size_row = ggml_row_size(k->type, n_embd_k_gqa);
+            if (k_size_row != k_size_row_ref) {
+                LLAMA_LOG_ERROR("%s: mismatched key row size (%zu != %zu, layer %d, view %u)\n", __func__, k_size_row, (size_t) k_size_row_ref, il, view);
+                return false;
+            }
+
+            if (cell_count) {
+                if (sinfo.is_contiguous()) {
+                    io.read_tensor(k, sinfo.head() * k_size_row, cell_count * k_size_row);
+                } else {
+                    for (uint32_t i = 0; i < cell_count; ++i) {
+                        const size_t dst_offset = sinfo.idxs[0][i] * k_size_row;
+                        io.read_tensor(k, dst_offset, k_size_row);
+                    }
+                }
+            }
+
+            if (layer.residual && cell_count) {
+                std::vector<uint8_t> row(layer.residual->row_bytes);
                 for (uint32_t i = 0; i < cell_count; ++i) {
-                    const size_t dst_offset = sinfo.idxs[0][i] * k_size_row;
-                    io.read_tensor(k, dst_offset, k_size_row);
+                    const uint32_t cell = sinfo.is_contiguous() ? sinfo.head() + i : sinfo.idxs[0][i];
+                    ggml_backend_tensor_get(k, row.data(), static_cast<size_t>(cell) * layer.residual->row_bytes, row.size());
+                    if (!tq_residual_row_valid(row.data(), layer.residual->logical_channels, layer.residual->row_bytes)) {
+                        LLAMA_LOG_ERROR("%s: residual-parity row has a reserved code or non-zero padding bits\n", __func__);
+                        return false;
+                    }
                 }
             }
         }
@@ -2903,6 +3471,10 @@ ggml_tensor * llama_kv_cache_context::get_k(ggml_context * ctx, int32_t il) cons
     return kv->get_k(ctx, il, n_kv, sinfos[i_cur]);
 }
 
+ggml_tensor * llama_kv_cache_context::get_k(ggml_context * ctx, int32_t il, uint32_t view) const {
+    return kv->get_k(ctx, il, n_kv, sinfos[i_cur], view);
+}
+
 ggml_tensor * llama_kv_cache_context::get_v(ggml_context * ctx, int32_t il) const {
     return kv->get_v(ctx, il, n_kv, sinfos[i_cur]);
 }
@@ -2929,6 +3501,10 @@ ggml_tensor * llama_kv_cache_context::get_turbo_innerq_scale_inv() const {
 
 ggml_tensor * llama_kv_cache_context::cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il) const {
     return kv->cpy_k(ctx, k_cur, k_idxs, il, sinfos[i_cur]);
+}
+
+ggml_tensor * llama_kv_cache_context::cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il, uint32_t view) const {
+    return kv->cpy_k(ctx, k_cur, k_idxs, il, sinfos[i_cur], view);
 }
 
 ggml_tensor * llama_kv_cache_context::cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggml_tensor * v_idxs, int32_t il) const {

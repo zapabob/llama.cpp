@@ -60,6 +60,7 @@
 #include "ggml-cuda/gated_delta_net.cuh"
 #include "ggml-cuda/set.cuh"
 #include "ggml-cuda/set-rows.cuh"
+#include "ggml-cuda/tq-triality-consensus.cuh"
 #include "ggml-cuda/turbo-wht.cuh"
 #include "ggml-cuda/mmvq-tq.cuh"
 #include "ggml-cuda/pad_reflect_1d.cuh"
@@ -3081,6 +3082,9 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
         case GGML_OP_SET_ROWS:
             ggml_cuda_op_set_rows(ctx, dst);
             break;
+        case GGML_OP_TQ_TRIALITY_KQ_CONSENSUS:
+            ggml_cuda_tq_triality_kq_consensus(ctx, dst);
+            break;
         case GGML_OP_TURBO_WHT:
             ggml_cuda_turbo_wht(ctx, dst);
             break;
@@ -5645,6 +5649,42 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
         case GGML_OP_CLAMP:
         case GGML_OP_LOG:
             return true;
+        case GGML_OP_TQ_TRIALITY_KQ_CONSENSUS: {
+            const ggml_tensor * q = op->src[0];
+            if (q == nullptr || op->type != GGML_TYPE_F32 || op->nb[0] != sizeof(float) ||
+                    (q->type != GGML_TYPE_F32 && q->type != GGML_TYPE_F16) ||
+                    q->nb[0] != ggml_type_size(q->type) || q->ne[0] <= 0 || q->ne[0] % 8 != 0) {
+                return false;
+            }
+            const int64_t padded_dim = ((q->ne[0] + 127) / 128) * 128;
+            for (int branch = 0; branch < 3; ++branch) {
+                const ggml_tensor * key = op->src[1 + branch];
+                const bool quantized = key != nullptr &&
+                    (key->type == GGML_TYPE_TURBO2_0 || key->type == GGML_TYPE_TURBO3_0 ||
+                     key->type == GGML_TYPE_TURBO4_0);
+                if (key == nullptr ||
+                        (key->type != GGML_TYPE_F32 && key->type != GGML_TYPE_F16 && !quantized) ||
+                        key->nb[0] != ggml_type_size(key->type) ||
+                        key->ne[0] != (quantized ? padded_dim : q->ne[0]) ||
+                        q->ne[2] % key->ne[2] != 0 || q->ne[3] % key->ne[3] != 0) {
+                    return false;
+                }
+                const ggml_tensor * rotation = op->src[4 + branch];
+                if (rotation != nullptr) {
+                    const bool dense =
+                        rotation->ne[0] == q->ne[0] && rotation->ne[1] == q->ne[0] &&
+                        rotation->ne[2] == 1 && rotation->ne[3] == 1;
+                    const bool packed =
+                        rotation->ne[0] == 8 && rotation->ne[1] == 8 &&
+                        rotation->ne[2] == q->ne[0] / 8 && rotation->ne[3] == 1;
+                    if (rotation->type != GGML_TYPE_F32 || rotation->nb[0] != sizeof(float) ||
+                            (!dense && !packed)) {
+                        return false;
+                    }
+                }
+            }
+            return true;
+        }
         case GGML_OP_TURBO_WHT:
             return op->src[0]->type == GGML_TYPE_F32 && op->type == GGML_TYPE_F32 &&
                    op->src[0]->ne[0] % 32 == 0;  // supports 32, 64, and 128 WHT groups

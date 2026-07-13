@@ -1357,6 +1357,9 @@ llm_graph_context::llm_graph_context(const llm_graph_params & params) :
     loras            (params.loras),
     mctx             (params.mctx),
     cross            (params.cross),
+    model            (params.model),
+    turboquant       (params.turboquant),
+    turboquant_revision(params.turboquant_revision),
     samplers         (params.samplers),
     cb_func          (params.cb),
     res              (params.res),
@@ -2395,7 +2398,13 @@ ggml_tensor * llm_graph_context::build_attn_mha(
          ggml_tensor * sinks,
          ggml_tensor * v_mla,
                float   kq_scale,
-                 int   il) const {
+                 int   il,
+         ggml_tensor * tq_k1,
+         ggml_tensor * tq_k2,
+         ggml_tensor * tq_r0,
+         ggml_tensor * tq_r1,
+         ggml_tensor * tq_r2,
+         const llama_tq_layer_config * tq_layer) const {
     const bool v_trans = v->nb[1] > v->nb[2];
 
     // split the batch into streams if needed
@@ -2406,6 +2415,11 @@ ggml_tensor * llm_graph_context::build_attn_mha(
     q = ggml_permute(ctx0, q, 0, 2, 1, 3);
     k = ggml_permute(ctx0, k, 0, 2, 1, 3);
     v = ggml_permute(ctx0, v, 0, 2, 1, 3);
+    if (tq_layer) {
+        GGML_ASSERT(tq_k1 && tq_k2);
+        tq_k1 = ggml_permute(ctx0, tq_k1, 0, 2, 1, 3);
+        tq_k2 = ggml_permute(ctx0, tq_k2, 0, 2, 1, 3);
+    }
 
     // TurboQuant note: graph-side Q rotation (pre-rotate-queries) is implemented below
     // in the flash-attn path. The VEC kernel bug (wrong Q/K stride in
@@ -2413,7 +2427,7 @@ ggml_tensor * llm_graph_context::build_attn_mha(
 
     ggml_tensor * cur;
 
-    const bool use_flash_attn = cparams.flash_attn && kq_b == nullptr;
+    const bool use_flash_attn = cparams.flash_attn && kq_b == nullptr && tq_layer == nullptr;
     if (use_flash_attn) {
         GGML_ASSERT(kq_b == nullptr && "Flash attention does not support KQ bias yet");
 
@@ -2470,12 +2484,39 @@ ggml_tensor * llm_graph_context::build_attn_mha(
 
         cur = ggml_reshape_2d(ctx0, cur, cur->ne[0]*cur->ne[1], cur->ne[2]*cur->ne[3]);
     } else {
-        ggml_tensor * kq = ggml_mul_mat(ctx0, k, q);
+        ggml_tensor * kq;
+        if (tq_layer) {
+            float weights[3];
+            float bias[3];
+            float scale[3];
+            float temperature[3];
+            for (uint32_t view = 0; view < 3; ++view) {
+                const llama_tq_branch_config * selected = nullptr;
+                for (uint32_t branch = 0; branch < 3; ++branch) {
+                    if (static_cast<uint32_t>(tq_layer->branches[branch].view) == view) {
+                        selected = &tq_layer->branches[branch];
+                        break;
+                    }
+                }
+                GGML_ASSERT(selected);
+                weights[view] = selected->weight;
+                bias[view] = selected->bias;
+                scale[view] = selected->scale;
+                temperature[view] = selected->temperature;
+            }
+            kq = ggml_tq_triality_kq_consensus(
+                ctx0, q, k, tq_k1, tq_k2, tq_r0, tq_r1, tq_r2,
+                weights, bias, scale, temperature);
+        } else {
+            kq = ggml_mul_mat(ctx0, k, q);
+        }
         cb(kq, "kq", il);
 
         // note: this op tends to require high floating point range
         //       while for some models F16 is enough, for others it is not, so we default to F32 here
-        ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
+        if (!tq_layer) {
+            ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
+        }
 
         if (arch == LLM_ARCH_GROK) {
             // need to do the following:
@@ -2678,6 +2719,13 @@ ggml_tensor * llm_graph_context::build_attn(
             int       il) const {
     GGML_ASSERT(v_mla == nullptr);
 
+    const llama_tq_layer_config * tq_layer = nullptr;
+    llama_tq_execution tq_execution = LLAMA_TQ_EXEC_SINGLE_VIEW;
+    if (turboquant && static_cast<size_t>(il) < turboquant->layers.size()) {
+        tq_layer = &turboquant->layers[il];
+        tq_execution = turboquant->execution;
+    }
+
     if (inp->self_k_rot) {
         q_cur = llama_mul_mat_hadamard(ctx0, q_cur, inp->self_k_rot);
         k_cur = llama_mul_mat_hadamard(ctx0, k_cur, inp->self_k_rot);
@@ -2687,12 +2735,48 @@ ggml_tensor * llm_graph_context::build_attn(
         v_cur = llama_mul_mat_hadamard(ctx0, v_cur, inp->self_v_rot);
     }
 
+    const bool tq_consensus = tq_layer && tq_execution == LLAMA_TQ_EXEC_ATTENTION_LOGIT_CONSENSUS;
+    std::array<ggml_tensor *, 3> tq_k_cur = { k_cur, nullptr, nullptr };
+    if (tq_consensus) {
+        for (uint32_t view = 0; view < 3; ++view) {
+            auto * rotation = model->turboquant_rotation(il, view);
+            tq_k_cur[view] = rotation ? ggml_mul_mat(ctx0, rotation, k_cur) : k_cur;
+        }
+    } else if (tq_layer && tq_execution != LLAMA_TQ_EXEC_RESIDUAL_PARITY) {
+        uint32_t selected = 0;
+        float selected_error = std::numeric_limits<float>::infinity();
+        for (uint32_t branch = 0; branch < 3; ++branch) {
+            if ((tq_layer->active_mask & (uint8_t(1) << branch)) == 0) {
+                continue;
+            }
+            if (tq_execution == LLAMA_TQ_EXEC_SINGLE_VIEW || tq_layer->branches[branch].expected_error < selected_error) {
+                selected = branch;
+                selected_error = tq_layer->branches[branch].expected_error;
+                if (tq_execution == LLAMA_TQ_EXEC_SINGLE_VIEW) {
+                    break;
+                }
+            }
+        }
+        const uint32_t view = static_cast<uint32_t>(tq_layer->branches[selected].view);
+        if (auto * rotation = model->turboquant_rotation(il, view)) {
+            q_cur = ggml_mul_mat(ctx0, rotation, q_cur);
+            k_cur = ggml_mul_mat(ctx0, rotation, k_cur);
+            tq_k_cur[0] = k_cur;
+        }
+    }
+
     // these nodes are added to the graph together so that they are not reordered
     // by doing so, the number of splits in the graph is reduced
     // expand k later to enable rope fusion which directly writes into k-v cache
     ggml_build_forward_expand(gf, q_cur);
     ggml_build_forward_expand(gf, v_cur);
-    ggml_build_forward_expand(gf, k_cur);
+    if (tq_consensus) {
+        for (auto * view : tq_k_cur) {
+            ggml_build_forward_expand(gf, view);
+        }
+    } else {
+        ggml_build_forward_expand(gf, k_cur);
+    }
 
     const auto * mctx_cur = inp->mctx;
 
@@ -2701,7 +2785,13 @@ ggml_tensor * llm_graph_context::build_attn(
         const auto & k_idxs = inp->get_k_idxs();
         const auto & v_idxs = inp->get_v_idxs();
 
-        ggml_build_forward_expand(gf, mctx_cur->cpy_k(ctx0, k_cur, k_idxs, il));
+        if (tq_consensus) {
+            for (uint32_t view = 0; view < 3; ++view) {
+                ggml_build_forward_expand(gf, mctx_cur->cpy_k(ctx0, tq_k_cur[view], k_idxs, il, view));
+            }
+        } else {
+            ggml_build_forward_expand(gf, mctx_cur->cpy_k(ctx0, k_cur, k_idxs, il));
+        }
         ggml_build_forward_expand(gf, mctx_cur->cpy_v(ctx0, v_cur, v_idxs, il));
     }
 
@@ -2709,12 +2799,14 @@ ggml_tensor * llm_graph_context::build_attn(
 
     ggml_tensor * q = q_cur;
     ggml_tensor * k = mctx_cur->get_k(ctx0, il);
+    ggml_tensor * tq_k1 = tq_consensus ? mctx_cur->get_k(ctx0, il, 1) : nullptr;
+    ggml_tensor * tq_k2 = tq_consensus ? mctx_cur->get_k(ctx0, il, 2) : nullptr;
     ggml_tensor * v = mctx_cur->get_v(ctx0, il);
 
     // TurboQuant pre-rotate-queries: O(d log d) WHT rotation via custom op
     // Q shape: (n_embd_head, n_head, n_tokens)
     // For zero-padded models (head_dim not 128-aligned), pad Q to match padded K dim first.
-    if (k->type == GGML_TYPE_TURBO3_0 || k->type == GGML_TYPE_TURBO4_0 || k->type == GGML_TYPE_TURBO2_0) {
+    if (!tq_consensus && (k->type == GGML_TYPE_TURBO3_0 || k->type == GGML_TYPE_TURBO4_0 || k->type == GGML_TYPE_TURBO2_0)) {
         // Pad Q per-head to next multiple of 128 if needed
         if (q->ne[0] % 128 != 0) {
             const int64_t pad = ((q->ne[0] + 127) / 128) * 128 - q->ne[0];
@@ -2725,7 +2817,13 @@ ggml_tensor * llm_graph_context::build_attn(
         q = ggml_turbo_wht(ctx0, q, 0, 0, innerq_scale);  // 0 = forward, 0 = auto group size from q->ne[0]
     }
 
-    ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask, sinks, v_mla, kq_scale, il);
+    ggml_tensor * cur = build_attn_mha(
+        q, k, v, kq_b, kq_mask, sinks, v_mla, kq_scale, il,
+        tq_k1, tq_k2,
+        tq_consensus ? model->turboquant_rotation(il, 0) : nullptr,
+        tq_consensus ? model->turboquant_rotation(il, 1) : nullptr,
+        tq_consensus ? model->turboquant_rotation(il, 2) : nullptr,
+        tq_consensus ? tq_layer : nullptr);
     cb(cur, "kqv_out", il);
 
     // TurboQuant: if V was padded, the output has padded dimensions.

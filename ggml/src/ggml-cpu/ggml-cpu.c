@@ -83,6 +83,8 @@ float ggml_table_f32_f16[1 << 16];
 // precomputed f32 table for e8m0 half (1 KB) (simd-mappings.h)
 float ggml_table_f32_e8m0_half[1 << 8];
 
+float ggml_table_f32_ue4m3[1 << 8];
+
 #if defined(__ARM_ARCH)
 struct ggml_arm_arch_features_type {
     int sve_cnt;
@@ -1882,6 +1884,10 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
             {
                 ggml_compute_forward_mul_mat(params, tensor);
             } break;
+        case GGML_OP_TQ_TRIALITY_KQ_CONSENSUS:
+            {
+                ggml_compute_forward_tq_triality_kq_consensus(params, tensor);
+            } break;
         case GGML_OP_MUL_MAT_ID:
             {
                 ggml_compute_forward_mul_mat_id(params, tensor);
@@ -2364,6 +2370,7 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
         case GGML_OP_GROUP_NORM:
         case GGML_OP_CONCAT:
         case GGML_OP_MUL_MAT:
+        case GGML_OP_TQ_TRIALITY_KQ_CONSENSUS:
         case GGML_OP_MUL_MAT_ID:
         case GGML_OP_OUT_PROD:
             {
@@ -2887,6 +2894,11 @@ struct ggml_cplan ggml_graph_plan(
                         if (node->src[1]->type != vec_dot_type) {
                             cur = ggml_row_size(vec_dot_type, ggml_nelements(node->src[1]));
                         }
+                    } break;
+                case GGML_OP_TQ_TRIALITY_KQ_CONSENSUS:
+                    {
+                        const int64_t padded_dim = ((node->src[0]->ne[0] + 127) / 128) * 128;
+                        cur = sizeof(float) * (128 + padded_dim) * n_tasks;
                     } break;
                 case GGML_OP_MUL_MAT_ID:
                     {
@@ -3982,6 +3994,7 @@ void ggml_cpu_init(void) {
             // initialize E8M0 half table (256 entries)
             for (int i = 0; i < (1 << 8); ++i) {
                 ggml_table_f32_e8m0_half[i] = GGML_E8M0_TO_FP32_HALF(i);
+                ggml_table_f32_ue4m3[i] = ggml_ue4m3_to_fp32((uint8_t) i);
             }
 
             const uint64_t t_end = ggml_time_us(); UNUSED(t_end);

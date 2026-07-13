@@ -41,6 +41,7 @@ struct llama_tq_branch_config {
     float weight;
     float bias;
     float scale;
+    // Reserved positive finite ABI metadata; current consensus math does not apply it.
     float temperature;
     float expected_error;
     uint32_t bits_per_channel_milli;
@@ -59,6 +60,8 @@ struct llama_tq_context_config {
     bool required;
     bool trace_enabled;
     float js_fallback_threshold;
+    // Development-only opt-in for models that intentionally omit view rotations.
+    bool allow_identity_view_fallback;
 };
 
 struct llama_tq_error {

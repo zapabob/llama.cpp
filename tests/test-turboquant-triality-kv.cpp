@@ -2,6 +2,7 @@
 #include "turboquant-consensus-testing.h"
 
 #include <array>
+#include <cmath>
 #include <limits>
 #include <string>
 #include <vector>
@@ -89,6 +90,57 @@ int main() {
         t.assert_true("unknown storage mode fails closed",
                       !llama_tq_require_runtime_capabilities(static_cast<llama_tq_k_storage_mode>(99), false,
                                                              capabilities, &error));
+    });
+
+    t.test("view_shift_inverse_rotates_before_rope_and_rotates_forward", [](tq_testing & t) {
+        using vector8 = std::array<float, 8>;
+        using matrix8 = std::array<float, 64>;
+
+        matrix8 rotation {};
+        for (size_t i = 0; i < 8; ++i) {
+            rotation[i * 8 + i] = 1.0f;
+        }
+        const float c = std::cos(0.37f);
+        const float s = std::sin(0.37f);
+        rotation[0] = c;
+        rotation[1] = -s;
+        rotation[8] = s;
+        rotation[9] = c;
+        rotation[36] = c;
+        rotation[37] = -s;
+        rotation[44] = s;
+        rotation[45] = c;
+
+        const auto multiply = [](const matrix8 & matrix, const vector8 & value, bool transpose) {
+            vector8 result {};
+            for (size_t row = 0; row < 8; ++row) {
+                for (size_t col = 0; col < 8; ++col) {
+                    result[row] += matrix[(transpose ? col * 8 + row : row * 8 + col)] * value[col];
+                }
+            }
+            return result;
+        };
+        const auto rope_shift = [](vector8 value) {
+            for (size_t pair = 0; pair < 4; ++pair) {
+                const float angle = 0.19f * static_cast<float>(pair + 1);
+                const float rc = std::cos(angle);
+                const float rs = std::sin(angle);
+                const float x = value[2 * pair];
+                const float y = value[2 * pair + 1];
+                value[2 * pair] = rc * x - rs * y;
+                value[2 * pair + 1] = rs * x + rc * y;
+            }
+            return value;
+        };
+
+        const vector8 base = { 0.2f, -0.7f, 1.1f, 0.4f, -0.3f, 0.8f, 0.6f, -1.2f };
+        const vector8 stored = multiply(rotation, base, false);
+        const vector8 recovered = multiply(rotation, stored, true);
+        const vector8 shifted_view = multiply(rotation, rope_shift(recovered), false);
+        const vector8 expected = multiply(rotation, rope_shift(base), false);
+        for (size_t i = 0; i < 8; ++i) {
+            t.assert_true("inverse-R shift matches direct re-encoding", std::fabs(shifted_view[i] - expected[i]) < 1e-6f);
+        }
     });
 
     return t.summary();

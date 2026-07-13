@@ -238,6 +238,8 @@ if (NOT WIN32 OR NOT BUILD_SHARED_LIBS)
     set_tests_properties(test-turboquant-context-config PROPERTIES FIXTURES_REQUIRED test-download-model)
 endif()
 
+llama_build_and_test(test-turboquant-telemetry-live.cpp)
+
 llama_build_and_test(test-arg-parser.cpp)
 
 if (NOT LLAMA_SANITIZE_ADDRESS AND NOT GGML_SCHED_NO_REALLOC)
@@ -307,16 +309,31 @@ if (NOT GGML_BACKEND_DL)
             llama_test(test-turboquant-cuda-kernels)
         endif()
     endif()
+    add_executable(test-turboquant-ggml-consensus test-turboquant-ggml-consensus.cpp)
+    target_link_libraries(test-turboquant-ggml-consensus PRIVATE ggml)
+    if (GGML_CUDA)
+        find_package(CUDAToolkit REQUIRED)
+        target_compile_definitions(
+            test-turboquant-ggml-consensus
+            PRIVATE TQ_CONSENSUS_CUDA_COMPILER_VERSION="${CUDAToolkit_VERSION}"
+        )
+    endif()
+    if (LLAMA_TESTS_INSTALL)
+        install(TARGETS test-turboquant-ggml-consensus RUNTIME)
+    endif()
+    llama_test(test-turboquant-ggml-consensus)
     llama_build_and_test(test-col2im-1d.cpp)
 endif()
 
 llama_build_and_test(test-turboquant-c-api.c)
 
 # libmtmd
-set(LLAMA_TEST_NAME test-mtmd-c-api)
-llama_build_and_test(test-mtmd-c-api.c)
-target_link_libraries(${LLAMA_TEST_NAME} PRIVATE mtmd)
-unset(LLAMA_TEST_NAME)
+if (TARGET mtmd)
+    set(LLAMA_TEST_NAME test-mtmd-c-api)
+    llama_build_and_test(test-mtmd-c-api.c)
+    target_link_libraries(${LLAMA_TEST_NAME} PRIVATE mtmd)
+    unset(LLAMA_TEST_NAME)
+endif()
 
 # GGUF model data fetcher library for tests that need real model metadata
 # Only compile when cpp-httplib has SSL support (CPPHTTPLIB_OPENSSL_SUPPORT)

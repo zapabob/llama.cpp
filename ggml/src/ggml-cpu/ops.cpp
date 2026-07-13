@@ -2,6 +2,7 @@
 
 #include "ggml-cpu.h"
 #include "ggml-impl.h"
+#include "ggml-quants.h"
 #include "binary-ops.h"
 #include "simd-gemm.h"
 #include "ggml.h"
@@ -10912,6 +10913,175 @@ void ggml_compute_forward_gated_delta_net(
 // WHT sign arrays (must match Metal shader turbo_wht_signs1/2)
 static const float turbo_wht_s1[128] = {-1,1,1,-1,-1,1,-1,1,-1,-1,1,1,1,1,1,1,1,-1,1,-1,1,-1,-1,1,1,1,-1,1,1,-1,-1,-1,-1,1,1,-1,1,1,-1,1,-1,1,1,-1,-1,1,-1,1,1,1,1,-1,-1,-1,-1,-1,1,-1,1,1,1,1,-1,1,-1,-1,1,-1,-1,-1,1,-1,-1,-1,1,-1,-1,-1,1,1,1,-1,-1,1,1,1,-1,-1,1,1,-1,1,1,-1,1,-1,-1,1,1,-1,1,-1,1,-1,1,1,1,1,-1,1,-1,1,1,-1,1,1,-1,-1,-1,-1,-1,1,1,-1,1,1,-1,1};
 static const float turbo_wht_s2[128] = {1,1,1,1,-1,1,1,-1,1,-1,-1,-1,1,-1,-1,-1,1,1,-1,-1,1,-1,1,-1,1,-1,-1,1,-1,1,1,1,1,1,-1,-1,-1,1,-1,-1,-1,-1,-1,-1,1,1,1,-1,1,-1,1,1,1,-1,-1,1,-1,-1,-1,-1,-1,-1,1,1,1,-1,1,-1,-1,-1,-1,1,-1,1,-1,1,-1,-1,1,1,-1,1,-1,1,1,-1,1,-1,-1,-1,-1,1,-1,-1,1,-1,1,-1,1,1,1,-1,-1,1,-1,1,-1,1,1,-1,-1,1,-1,1,-1,1,1,-1,1,-1,1,-1,-1,-1,-1,-1,1,-1};
+
+static float ggml_tq_triality_load_scalar(const ggml_tensor * tensor, const char * address) {
+    if (tensor->type == GGML_TYPE_F32) {
+        return *(const float *) address;
+    }
+    GGML_ASSERT(tensor->type == GGML_TYPE_F16);
+    return GGML_FP16_TO_FP32(*(const ggml_fp16_t *) address);
+}
+
+static float ggml_tq_triality_load_q(
+        const ggml_tensor * q,
+        int64_t dim,
+        int64_t query,
+        int64_t head,
+        int64_t stream) {
+    const char * address = (const char *) q->data +
+        dim * q->nb[0] + query * q->nb[1] + head * q->nb[2] + stream * q->nb[3];
+    return ggml_tq_triality_load_scalar(q, address);
+}
+
+static float ggml_tq_triality_rotate_q(
+        const ggml_tensor * q,
+        const ggml_tensor * rotation,
+        int64_t dim,
+        int64_t query,
+        int64_t head,
+        int64_t stream) {
+    if (rotation == nullptr) {
+        return ggml_tq_triality_load_q(q, dim, query, head, stream);
+    }
+    const int64_t block = dim / 8;
+    const int64_t row = dim % 8;
+    float value = 0.0f;
+    for (int64_t col = 0; col < 8; ++col) {
+        const int64_t q_dim = block * 8 + col;
+        const char * coefficient_address;
+        if (rotation->ne[0] == q->ne[0]) {
+            coefficient_address = (const char *) rotation->data +
+                q_dim * rotation->nb[0] + dim * rotation->nb[1];
+        } else {
+            coefficient_address = (const char *) rotation->data +
+                col * rotation->nb[0] + row * rotation->nb[1] + block * rotation->nb[2];
+        }
+        value += *(const float *) coefficient_address *
+            ggml_tq_triality_load_q(q, q_dim, query, head, stream);
+    }
+    return value;
+}
+
+static void ggml_tq_triality_dequantize_key_row(
+        const ggml_tensor * key,
+        const char * row,
+        float * output) {
+    switch (key->type) {
+        case GGML_TYPE_TURBO2_0:
+            dequantize_row_turbo2_0((const block_turbo2_0 *) row, output, key->ne[0]);
+            break;
+        case GGML_TYPE_TURBO3_0:
+            dequantize_row_turbo3_0((const block_turbo3_0 *) row, output, key->ne[0]);
+            break;
+        case GGML_TYPE_TURBO4_0:
+            dequantize_row_turbo4_0((const block_turbo4_0 *) row, output, key->ne[0]);
+            break;
+        default:
+            GGML_ABORT("unsupported TurboQuant consensus key type");
+    }
+}
+
+static void ggml_tq_triality_wht(float * values) {
+    for (int64_t i = 0; i < 128; ++i) {
+        values[i] *= turbo_wht_s1[i];
+    }
+    for (int64_t width = 1; width < 128; width *= 2) {
+        for (int64_t base = 0; base < 128; base += 2 * width) {
+            for (int64_t offset = 0; offset < width; ++offset) {
+                const float lhs = values[base + offset];
+                const float rhs = values[base + offset + width];
+                values[base + offset] = lhs + rhs;
+                values[base + offset + width] = lhs - rhs;
+            }
+        }
+    }
+    for (int64_t i = 0; i < 128; ++i) {
+        values[i] *= turbo_wht_s2[i] * 0.08838834764831845f;
+    }
+}
+
+void ggml_compute_forward_tq_triality_kq_consensus(
+        const ggml_compute_params * params,
+        ggml_tensor * dst) {
+    const ggml_tensor * q = dst->src[0];
+    const ggml_tensor * keys[3] = { dst->src[1], dst->src[2], dst->src[3] };
+    const ggml_tensor * rotations[3] = { dst->src[4], dst->src[5], dst->src[6] };
+    const float * op_params = (const float *) dst->op_params;
+    const float * weights = op_params + 0;
+    const float * bias = op_params + 3;
+    const float * scale = op_params + 6;
+
+    GGML_ASSERT(q->nb[0] == ggml_type_size(q->type));
+    GGML_ASSERT(dst->nb[0] == sizeof(float));
+    const int64_t padded_dim = ((q->ne[0] + 127) / 128) * 128;
+    const int64_t n_groups = padded_dim / 128;
+    float * thread_workspace = (float *) params->wdata +
+        params->ith * (128 + padded_dim);
+    float * q_group = thread_workspace;
+    float * key_row_scratch = thread_workspace + 128;
+
+    const int64_t n_outputs = ggml_nelements(dst);
+    const int64_t output_begin = n_outputs * params->ith / params->nth;
+    const int64_t output_end = n_outputs * (params->ith + 1) / params->nth;
+    for (int64_t output_index = output_begin; output_index < output_end; ++output_index) {
+        int64_t remaining = output_index;
+        const int64_t kv = remaining % dst->ne[0];
+        remaining /= dst->ne[0];
+        const int64_t query = remaining % dst->ne[1];
+        remaining /= dst->ne[1];
+        const int64_t head = remaining % dst->ne[2];
+        const int64_t stream = remaining / dst->ne[2];
+
+        float consensus = 0.0f;
+        for (int branch = 0; branch < 3; ++branch) {
+            const ggml_tensor * key = keys[branch];
+            GGML_ASSERT(key->nb[0] == ggml_type_size(key->type));
+            const int64_t key_head = head / (q->ne[2] / key->ne[2]);
+            const int64_t key_stream = stream / (q->ne[3] / key->ne[3]);
+            const char * key_row = (const char *) key->data +
+                kv * key->nb[1] + key_head * key->nb[2] + key_stream * key->nb[3];
+            const bool quantized =
+                key->type == GGML_TYPE_TURBO2_0 ||
+                key->type == GGML_TYPE_TURBO3_0 ||
+                key->type == GGML_TYPE_TURBO4_0;
+            if (quantized) {
+                ggml_tq_triality_dequantize_key_row(key, key_row, key_row_scratch);
+            } else {
+                for (int64_t group = 0; group < n_groups; ++group) {
+                    float * key_group = key_row_scratch + group * 128;
+                    for (int64_t i = 0; i < 128; ++i) {
+                        const int64_t dim = group * 128 + i;
+                        key_group[i] = dim < q->ne[0]
+                            ? ggml_tq_triality_load_scalar(key, key_row + dim * key->nb[0])
+                            : 0.0f;
+                    }
+                    ggml_tq_triality_wht(key_group);
+                }
+            }
+
+            float dot = 0.0f;
+            for (int64_t group = 0; group < n_groups; ++group) {
+                for (int64_t i = 0; i < 128; ++i) {
+                    const int64_t dim = group * 128 + i;
+                    q_group[i] = dim < q->ne[0]
+                        ? ggml_tq_triality_rotate_q(q, rotations[branch], dim, query, head, stream)
+                        : 0.0f;
+                }
+                ggml_tq_triality_wht(q_group);
+                for (int64_t i = 0; i < 128; ++i) {
+                    const int64_t dim = group * 128 + i;
+                    dot += q_group[i] * key_row_scratch[dim];
+                }
+            }
+            consensus += weights[branch] *
+                ((dot - bias[branch]) / fmaxf(scale[branch], 1.0e-6f));
+        }
+
+        char * output = (char *) dst->data +
+            kv * dst->nb[0] + query * dst->nb[1] + head * dst->nb[2] + stream * dst->nb[3];
+        *(float *) output = consensus;
+    }
+}
 
 static void ggml_compute_forward_turbo_wht_f32(
         const ggml_compute_params * params,

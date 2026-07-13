@@ -2,6 +2,7 @@
 
 #include "llama.h"
 #include "llama-graph.h"
+#include "llama-turboquant.h"
 
 #include <map>
 #include <memory>
@@ -25,6 +26,9 @@ struct llama_memory_params {
     llama_context_type ctx_type;
 
     llama_memory_t mem_other;
+
+    uint32_t tq_view_capacity = 1;
+    llama_tq_execution tq_execution = LLAMA_TQ_EXEC_SINGLE_VIEW;
 };
 
 enum llama_memory_status {

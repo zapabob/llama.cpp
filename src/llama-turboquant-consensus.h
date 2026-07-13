@@ -113,6 +113,7 @@ struct llama_tq_residual_parity_budget {
     uint64_t                total_bytes              = 0;
     double                  payload_bits_per_channel = 0.0;
     double                  actual_bits_per_channel  = 0.0;
+    bool                    five_bit_target_met      = false;
 };
 
 bool llama_tq_residual_parity_encode_f32(const std::vector<float> &               values,
@@ -129,3 +130,67 @@ bool llama_tq_residual_parity_decode_f32(const llama_tq_residual_parity_storage 
                                          std::string *                            error);
 
 llama_tq_residual_parity_budget llama_tq_residual_parity_measure(const llama_tq_residual_parity_storage & storage);
+
+constexpr size_t LLAMA_TQ_RESIDUAL_PARITY_CONTROLLER_BYTES = 51;
+constexpr size_t LLAMA_TQ_RESIDUAL_PARITY_LOGICAL_BITS_PER_CHANNEL = 5;
+constexpr size_t LLAMA_TQ_RESIDUAL_PARITY_PHYSICAL_BITS_PER_CHANNEL = 4;
+
+struct llama_tq_residual_parity_fixed_config {
+    std::array<float, 3> sector_scales{ 1.0f, 1.0f, 1.0f };
+    std::array<float, 2> beta{ 0.5f, 0.5f };
+};
+
+struct llama_tq_residual_parity_fixed_storage {
+    size_t n_vectors = 0;
+    size_t width = 0;
+    size_t row_bytes = 0;
+    llama_tq_residual_parity_fixed_config config;
+    std::vector<uint8_t> payload;
+    std::array<uint8_t, LLAMA_TQ_RESIDUAL_PARITY_CONTROLLER_BYTES> controller{};
+};
+
+struct llama_tq_residual_parity_production_budget {
+    uint64_t logical_payload_bits = 0;
+    uint64_t physical_payload_bytes = 0;
+    uint64_t controller_bytes = 0;
+    uint64_t total_bytes = 0;
+    double logical_payload_bits_per_channel = 0.0;
+    double physical_payload_bits_per_channel = 0.0;
+    double actual_bits_per_channel = 0.0;
+    bool five_bit_target_met = false;
+};
+
+bool llama_tq_residual_parity_encode_fixed_f32(
+        const std::vector<float> & values,
+        size_t n_vectors,
+        size_t width,
+        const llama_tq_rotation_bundle & rotations,
+        const llama_tq_residual_parity_fixed_config & config,
+        llama_tq_residual_parity_fixed_storage & storage,
+        std::string * error);
+
+bool llama_tq_residual_parity_decode_fixed_f32(
+        const llama_tq_residual_parity_fixed_storage & storage,
+        const llama_tq_rotation_bundle & rotations,
+        std::vector<float> & values,
+        std::string * error);
+
+bool llama_tq_residual_parity_decode_fixed_strided_f32(
+        const std::vector<uint8_t> & payload,
+        size_t n_stream,
+        size_t n_kv,
+        size_t width,
+        size_t stream_stride_bytes,
+        const llama_tq_rotation_bundle & rotations,
+        const llama_tq_residual_parity_fixed_config & config,
+        std::vector<float> & values,
+        std::string * error);
+
+bool llama_tq_residual_parity_validate_fixed_storage(
+        const llama_tq_residual_parity_fixed_storage & storage,
+        std::string * error);
+
+llama_tq_residual_parity_production_budget llama_tq_residual_parity_measure_production(
+        size_t n_layers,
+        size_t n_tokens,
+        size_t logical_channels);

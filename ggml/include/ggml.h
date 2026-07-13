@@ -576,6 +576,7 @@ extern "C" {
         GGML_OP_SOLVE_TRI,
         GGML_OP_GATED_DELTA_NET,
         GGML_OP_LIGHTNING_INDEXER,
+        GGML_OP_TQ_TRIALITY_KQ_CONSENSUS,
         GGML_OP_TURBO_WHT,
 
         GGML_OP_UNARY,
@@ -2588,6 +2589,22 @@ extern "C" {
             struct ggml_tensor  * k,
             struct ggml_tensor  * weights,
             struct ggml_tensor  * mask);
+
+    // Returns the FP32 weighted sum of (raw - bias[v]) / max(scale[v], 1e-6).
+    // temperature is validated reserved ABI metadata and is not applied by the current math.
+    GGML_API struct ggml_tensor * ggml_tq_triality_kq_consensus(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * q,
+            struct ggml_tensor  * k0,
+            struct ggml_tensor  * k1,
+            struct ggml_tensor  * k2,
+            struct ggml_tensor  * r0,
+            struct ggml_tensor  * r1,
+            struct ggml_tensor  * r2,
+            const float           weights[3],
+            const float           bias[3],
+            const float           scale[3],
+            const float           temperature[3]);
 
     // TurboQuant Walsh-Hadamard Transform (O(d log d) rotation for KV cache compression)
     // Applies WHT rotation to 128-element groups along ne[0]: sign1 → butterfly → sign2 → normalize

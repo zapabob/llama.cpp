@@ -372,6 +372,9 @@ llama_context::llama_context(
             /*.swa_full  =*/ params.swa_full,
             /*.ctx_type  =*/ cparams.ctx_type,
             /*.mem_other =*/ llama_get_memory(cparams.ctx_other),
+            turboquant_state.config() && turboquant_state.config()->execution == LLAMA_TQ_EXEC_RESIDUAL_PARITY ?
+                1u : turboquant_state.storage_view_capacity(),
+            turboquant_state.config() ? turboquant_state.config()->execution : LLAMA_TQ_EXEC_SINGLE_VIEW,
         };
 
         memory.reset(model.create_memory(params_mem, cparams));
@@ -715,6 +718,10 @@ const llama_cparams & llama_context::get_cparams() const {
     return cparams;
 }
 
+const llama_tq_owned_context_config * llama_context::get_turboquant_config() const {
+    return turboquant_state.config();
+}
+
 bool llama_context::turboquant_configure(const llama_tq_context_config & cfg, llama_tq_error * err) {
     if (!turboquant_state.configure(cfg, false, err)) {
         return false;
@@ -742,6 +749,26 @@ void llama_context::turboquant_reset_metrics() {
 
 void llama_context::turboquant_mark_started() {
     turboquant_state.mark_started();
+}
+
+bool llama_context::graph_eval_callback(ggml_tensor * tensor, bool ask, void * user_data) {
+    auto * ctx = static_cast<llama_context *>(user_data);
+    if (ask) {
+        ctx->graph_eval_user_requested = ctx->cparams.cb_eval &&
+            ctx->cparams.cb_eval(tensor, true, ctx->cparams.cb_eval_user_data);
+        ctx->graph_eval_turboquant_requested =
+            ctx->turboquant_telemetry.wants_graph_tensor(tensor);
+        return ctx->graph_eval_user_requested || ctx->graph_eval_turboquant_requested;
+    }
+
+    if (ctx->graph_eval_turboquant_requested) {
+        ctx->turboquant_telemetry.record_graph_tensor(tensor, ctx->turboquant_state.config());
+    }
+    const bool keep_computing = !ctx->graph_eval_user_requested ||
+        ctx->cparams.cb_eval(tensor, false, ctx->cparams.cb_eval_user_data);
+    ctx->graph_eval_user_requested = false;
+    ctx->graph_eval_turboquant_requested = false;
+    return keep_computing;
 }
 
 ggml_backend_sched_t llama_context::get_sched() const {
@@ -1351,7 +1378,11 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         res->reset();
 
         ggml_backend_sched_reset(sched.get());
-        ggml_backend_sched_set_eval_callback(sched.get(), cparams.cb_eval, cparams.cb_eval_user_data);
+        const bool needs_eval_callback = cparams.cb_eval || turboquant_telemetry.trace_enabled();
+        ggml_backend_sched_set_eval_callback(
+            sched.get(),
+            needs_eval_callback ? graph_eval_callback : nullptr,
+            needs_eval_callback ? this : nullptr);
 
         //const auto t_start_us = ggml_time_us();
 
@@ -2436,6 +2467,9 @@ llm_graph_params llama_context::graph_params(
         /*.loras       =*/ loras.get(),
         /*.mctx        =*/ mctx,
         /*.cross       =*/ &cross,
+        &model,
+        turboquant_state.config(),
+        turboquant_state.revision(),
         /*.samplers    =*/ sampling.samplers,
         /*.n_outputs   =*/ n_outputs,
         /*.cb          =*/ graph_get_cb(),
@@ -4097,20 +4131,83 @@ size_t llama_state_seq_load_file(llama_context * ctx, const char * filepath, lla
 ///
 
 static bool llama_tq_has_production_graph(llama_tq_execution execution) {
-    return execution == LLAMA_TQ_EXEC_SINGLE_VIEW || execution == LLAMA_TQ_EXEC_BEST_PER_LAYER;
+    return execution == LLAMA_TQ_EXEC_SINGLE_VIEW ||
+        execution == LLAMA_TQ_EXEC_BEST_PER_LAYER ||
+        execution == LLAMA_TQ_EXEC_ATTENTION_LOGIT_CONSENSUS ||
+        execution == LLAMA_TQ_EXEC_RESIDUAL_PARITY;
 }
 
-static bool llama_tq_required_execution_available(
+static bool llama_tq_execution_available(
+        const llama_model * model,
         const llama_tq_context_config * cfg,
         llama_tq_error * err) {
-    if (!cfg || !cfg->required || llama_tq_has_production_graph(cfg->execution)) {
+    if (!cfg || !model) {
+        return false;
+    }
+    if (!llama_tq_has_production_graph(cfg->execution)) {
+        if (err) {
+            err->code = LLAMA_TQ_ERROR_UNAVAILABLE;
+            std::snprintf(err->message, sizeof(err->message), "%s", "TurboQuant execution mode has no production graph implementation");
+        }
+        return false;
+    }
+    const size_t effective_n_layers = cfg->n_layers == 0 ? model->hparams.n_layer() : cfg->n_layers;
+    if (cfg->layers == nullptr) {
+        if (err) {
+            err->code = LLAMA_TQ_ERROR_INVALID_CONFIG;
+            std::snprintf(err->message, sizeof(err->message), "%s", "TurboQuant context requires layer configuration storage");
+        }
+        return false;
+    }
+    bool needs_view_rotations = cfg->execution != LLAMA_TQ_EXEC_SINGLE_VIEW;
+    if (!needs_view_rotations) {
+        for (size_t il = 0; il < effective_n_layers; ++il) {
+            for (uint32_t branch = 0; branch < 3; ++branch) {
+                if ((cfg->layers[il].active_mask & (uint8_t(1) << branch)) != 0 &&
+                    cfg->layers[il].branches[branch].view != LLAMA_TQ_VIEW_VECTOR) {
+                    needs_view_rotations = true;
+                }
+            }
+        }
+    }
+    if (!needs_view_rotations) {
         return true;
     }
-    if (err) {
-        err->code = LLAMA_TQ_ERROR_UNAVAILABLE;
-        std::snprintf(err->message, sizeof(err->message), "%s", "required TurboQuant execution mode has no production graph implementation");
+    if (model->arch != LLM_ARCH_LLAMA) {
+        if (err) {
+            err->code = LLAMA_TQ_ERROR_UNAVAILABLE;
+            std::snprintf(err->message, sizeof(err->message), "%s", "multi-view TurboQuant execution is implemented only for LLM_ARCH_LLAMA");
+        }
+        return false;
     }
-    return false;
+    const bool has_rotations = model->turboquant_rotations.size() == model->hparams.n_layer();
+    if (!has_rotations && !cfg->allow_identity_view_fallback) {
+        if (err) {
+            err->code = LLAMA_TQ_ERROR_UNAVAILABLE;
+            std::snprintf(err->message, sizeof(err->message), "%s", "multi-view TurboQuant execution requires schema-v2 view rotations or explicit identity fallback");
+        }
+        return false;
+    }
+    if (cfg->execution == LLAMA_TQ_EXEC_RESIDUAL_PARITY) {
+        const auto & residual = model->turboquant_metadata.residual_parity;
+        if (!residual.present || residual.layers.size() != model->hparams.n_layer()) {
+            if (err) {
+                err->code = LLAMA_TQ_ERROR_UNAVAILABLE;
+                std::snprintf(err->message, sizeof(err->message), "%s", "residual-parity execution requires canonical fixed-scale schema-v2 metadata");
+            }
+            return false;
+        }
+        for (uint32_t il = 0; il < model->hparams.n_layer(); ++il) {
+            if (ggml_backend_dev_type(model->dev_layer(il)) != GGML_BACKEND_DEVICE_TYPE_CPU) {
+                if (err) {
+                    err->code = LLAMA_TQ_ERROR_UNAVAILABLE;
+                    std::snprintf(err->message, sizeof(err->message), "%s", "residual-parity execution currently requires CPU model layers");
+                }
+                return false;
+            }
+        }
+    }
+    return true;
 }
 
 bool llama_tq_context_configure(
@@ -4124,7 +4221,7 @@ bool llama_tq_context_configure(
         }
         return false;
     }
-    if (!llama_tq_required_execution_available(cfg, err)) {
+    if (!llama_tq_execution_available(&ctx->get_model(), cfg, err)) {
         return false;
     }
     return ctx->turboquant_configure(*cfg, err);
@@ -4152,8 +4249,31 @@ llama_context * llama_tq_init_from_model(
         }
         return nullptr;
     }
-    if (!llama_tq_required_execution_available(cfg, err)) {
+    if (!llama_tq_execution_available(model, cfg, err)) {
         return nullptr;
+    }
+    if (cfg->execution == LLAMA_TQ_EXEC_ATTENTION_LOGIT_CONSENSUS) {
+        if (ggml_is_quantized(params.type_v)) {
+            if (err) {
+                err->code = LLAMA_TQ_ERROR_UNAVAILABLE;
+                std::snprintf(err->message, sizeof(err->message), "%s", "attention-logit consensus requires a non-quantized V cache");
+            }
+            return nullptr;
+        }
+        if (params.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_DISABLED) {
+            LLAMA_LOG_WARN("%s: disabling Flash Attention for pre-softmax Triality consensus\n", __func__);
+            params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
+        }
+    }
+    if (cfg->execution == LLAMA_TQ_EXEC_RESIDUAL_PARITY) {
+        if (params.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_DISABLED) {
+            LLAMA_LOG_WARN("%s: disabling Flash Attention for residual-parity decoded K\n", __func__);
+            params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
+        }
+        if (params.offload_kqv) {
+            LLAMA_LOG_WARN("%s: disabling KQV offload for residual-parity CPU custom operations\n", __func__);
+            params.offload_kqv = false;
+        }
     }
     return llama_init_from_model_impl(model, params, cfg, err);
 }

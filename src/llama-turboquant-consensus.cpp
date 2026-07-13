@@ -258,6 +258,137 @@ bool dequantize_sector(const llama_tq_packed_sector & sector,
     return true;
 }
 
+bool validate_fixed_config(const llama_tq_residual_parity_fixed_config & config, std::string * error) {
+    for (float scale : config.sector_scales) {
+        if (!std::isfinite(scale) || scale <= 0.0f) {
+            return set_error(error, "Residual-parity fixed sector scales must be finite and positive");
+        }
+    }
+    for (float beta : config.beta) {
+        if (!std::isfinite(beta) || beta < 0.0f) {
+            return set_error(error, "Residual-parity beta values must be finite and non-negative");
+        }
+    }
+    return true;
+}
+
+uint8_t residual_parity_minus_bit(uint8_t main_code, uint8_t selector) {
+    return static_cast<uint8_t>((selector ^ (main_code & 1u)) & 1u);
+}
+
+uint8_t choose_residual_parity_selector(
+        uint8_t main_code,
+        float plus_value,
+        float minus_value,
+        float plus_scale,
+        float minus_scale,
+        const std::array<float, 2> & beta) {
+    double best_error = std::numeric_limits<double>::infinity();
+    uint8_t best_selector = 0;
+    for (uint8_t selector = 0; selector < 2; ++selector) {
+        const uint8_t minus_bit = residual_parity_minus_bit(main_code, selector);
+        const double plus_reconstructed = plus_scale == 0.0f ? 0.0 : (selector ? plus_scale : -plus_scale);
+        const double minus_reconstructed = minus_scale == 0.0f ? 0.0 : (minus_bit ? minus_scale : -minus_scale);
+        const double plus_error = static_cast<double>(plus_value) - plus_reconstructed;
+        const double minus_error = static_cast<double>(minus_value) - minus_reconstructed;
+        const double error = static_cast<double>(beta[0]) * beta[0] * plus_error * plus_error +
+            static_cast<double>(beta[1]) * beta[1] * minus_error * minus_error;
+        if (error < best_error) {
+            best_error = error;
+            best_selector = selector;
+        }
+    }
+    return best_selector;
+}
+
+// The logical code remains main[3] + plus[1] + minus[1].  The physical nibble
+// stores main[3] + one selector[1]; minus is reconstructed from main parity.
+void pack_fixed_code(uint8_t * row, size_t channel, uint8_t main_code, uint8_t selector) {
+    const size_t bit_offset = channel * LLAMA_TQ_RESIDUAL_PARITY_PHYSICAL_BITS_PER_CHANNEL;
+    const size_t byte_offset = bit_offset / 8;
+    const size_t shift = bit_offset % 8;
+    const uint16_t physical_code = static_cast<uint16_t>((main_code & 0x07u) | ((selector & 1u) << 3));
+    const uint16_t shifted = physical_code << shift;
+    row[byte_offset] |= static_cast<uint8_t>(shifted);
+    if (shift > 4) {
+        row[byte_offset + 1] |= static_cast<uint8_t>(shifted >> 8);
+    }
+}
+
+uint8_t unpack_fixed_code(const uint8_t * row, size_t channel) {
+    const size_t bit_offset = channel * LLAMA_TQ_RESIDUAL_PARITY_PHYSICAL_BITS_PER_CHANNEL;
+    const size_t byte_offset = bit_offset / 8;
+    const size_t shift = bit_offset % 8;
+    uint16_t encoded = row[byte_offset];
+    if (shift > 4) {
+        encoded |= static_cast<uint16_t>(row[byte_offset + 1]) << 8;
+    }
+    return static_cast<uint8_t>((encoded >> shift) & 0x0fu);
+}
+
+void controller_write_u32(
+        std::array<uint8_t, LLAMA_TQ_RESIDUAL_PARITY_CONTROLLER_BYTES> & controller,
+        size_t & offset,
+        uint32_t value) {
+    for (size_t byte = 0; byte < sizeof(value); ++byte) {
+        controller[offset++] = static_cast<uint8_t>(value >> (byte * 8));
+    }
+}
+
+void controller_write_f32(
+        std::array<uint8_t, LLAMA_TQ_RESIDUAL_PARITY_CONTROLLER_BYTES> & controller,
+        size_t & offset,
+        float value) {
+    uint32_t bits = 0;
+    static_assert(sizeof(bits) == sizeof(value));
+    std::memcpy(&bits, &value, sizeof(bits));
+    controller_write_u32(controller, offset, bits);
+}
+
+std::array<uint8_t, LLAMA_TQ_RESIDUAL_PARITY_CONTROLLER_BYTES> make_fixed_controller(
+        size_t width,
+        size_t row_bytes,
+        const llama_tq_residual_parity_fixed_config & config) {
+    std::array<uint8_t, LLAMA_TQ_RESIDUAL_PARITY_CONTROLLER_BYTES> controller{};
+    size_t offset = 0;
+    controller[offset++] = 'T';
+    controller[offset++] = 'Q';
+    controller[offset++] = 'R';
+    controller[offset++] = 'P';
+    controller_write_u32(controller, offset, 2u);
+    controller_write_u32(controller, offset, static_cast<uint32_t>(width));
+    controller_write_u32(controller, offset, static_cast<uint32_t>(row_bytes));
+    controller[offset++] = 3u;
+    controller[offset++] = 1u;
+    controller[offset++] = 1u;
+    controller[offset++] = 1u;
+    for (float scale : config.sector_scales) {
+        controller_write_f32(controller, offset, scale);
+    }
+    for (float beta : config.beta) {
+        controller_write_f32(controller, offset, beta);
+    }
+    controller_write_u32(controller, offset, 5000u);
+    return controller;
+}
+
+bool validate_fixed_row(const uint8_t * row, size_t width, size_t row_bytes, std::string * error) {
+    for (size_t channel = 0; channel < width; ++channel) {
+        if ((unpack_fixed_code(row, channel) & 0x07u) == 0x04u) {
+            return set_error(error, "Residual-parity payload contains reserved main code 4");
+        }
+    }
+    const size_t used_bits = width * LLAMA_TQ_RESIDUAL_PARITY_PHYSICAL_BITS_PER_CHANNEL;
+    const size_t padding_bits = row_bytes * 8 - used_bits;
+    if (padding_bits != 0) {
+        const uint8_t used_mask = static_cast<uint8_t>((1u << (8 - padding_bits)) - 1u);
+        if ((row[row_bytes - 1] & static_cast<uint8_t>(~used_mask)) != 0) {
+            return set_error(error, "Residual-parity payload contains non-zero row padding");
+        }
+    }
+    return true;
+}
+
 }  // namespace
 
 bool llama_tq_require_runtime_capabilities(llama_tq_k_storage_mode               mode,
@@ -543,14 +674,15 @@ bool llama_tq_consensus_attention_f32(const std::vector<float> &                
                 if (!std::isfinite(dot)) {
                     return set_error(error, "Triality attention dot product overflowed");
                 }
-                const float calibrated = config.scale[view] * static_cast<float>(dot) * kq_scale + config.bias[view];
+                const float denominator = std::max(config.scale[view], 1e-6f);
+                const float calibrated = (static_cast<float>(dot) - config.bias[view]) / denominator;
                 if (!std::isfinite(calibrated)) {
                     return set_error(error, "Triality attention calibration overflowed");
                 }
                 computed.branch_logits[view][logit_index] = calibrated;
                 consensus += static_cast<double>(config.weights[view]) * calibrated;
             }
-            float logit = static_cast<float>(consensus / config.temperature);
+            float logit = static_cast<float>(consensus) * kq_scale;
             if (!std::isfinite(logit)) {
                 return set_error(error, "Triality attention consensus overflowed");
             }
@@ -651,13 +783,26 @@ bool llama_tq_residual_parity_encode_f32(const std::vector<float> &             
         residual[i] = values[i] - main_reconstructed[i];
     }
 
-    for (size_t view = 1; view < 3; ++view) {
-        const std::vector<float> rotated = apply_matrix(rotations.forward[view], residual, n_vectors, width);
-        if (!all_finite(rotated)) {
-            return set_error(error, "Residual-parity residual rotation overflowed");
-        }
-        encoded.sectors[view] = quantize_sector(rotated, profile.bits[view]);
+    const std::vector<float> plus_rotated = apply_matrix(rotations.forward[1], residual, n_vectors, width);
+    const std::vector<float> minus_rotated = apply_matrix(rotations.forward[2], residual, n_vectors, width);
+    if (!all_finite(plus_rotated) || !all_finite(minus_rotated)) {
+        return set_error(error, "Residual-parity residual rotation overflowed");
     }
+    encoded.sectors[1] = quantize_sector(plus_rotated, profile.bits[1]);
+    encoded.sectors[2] = quantize_sector(minus_rotated, profile.bits[2]);
+
+    std::vector<uint8_t> main_codes;
+    if (!unpack_codes(encoded.sectors[0], value_count, main_codes, error)) {
+        return false;
+    }
+    std::vector<uint8_t> selectors(value_count, 0);
+    for (size_t i = 0; i < value_count; ++i) {
+        selectors[i] = choose_residual_parity_selector(
+            main_codes[i], plus_rotated[i], minus_rotated[i],
+            encoded.sectors[1].scale, encoded.sectors[2].scale, profile.beta);
+    }
+    encoded.sectors[1].payload = pack_codes(selectors, 1);
+    encoded.sectors[2].payload.clear();
     storage = std::move(encoded);
     if (error) {
         error->clear();
@@ -685,15 +830,42 @@ bool llama_tq_residual_parity_decode_f32(const llama_tq_residual_parity_storage 
         return set_error(error, "Residual-parity beta values are invalid");
     }
 
-    std::array<std::vector<float>, 3> decoded;
-    std::array<std::vector<float>, 3> reconstructed;
     for (size_t view = 0; view < 3; ++view) {
         if (storage.sectors[view].bits != storage.profile.bits[view]) {
             return set_error(error, "Residual-parity sector bit width does not match its profile");
         }
-        if (!dequantize_sector(storage.sectors[view], value_count, decoded[view], error)) {
-            return false;
+        if (!std::isfinite(storage.sectors[view].scale) || storage.sectors[view].scale < 0.0f) {
+            return set_error(error, "Residual-parity sector scale is invalid");
         }
+    }
+    if (!storage.sectors[2].payload.empty()) {
+        return set_error(error, "Residual-parity derived-minus sector must not have a physical payload");
+    }
+
+    std::array<std::vector<float>, 3> decoded;
+    std::array<std::vector<float>, 3> reconstructed;
+    if (!dequantize_sector(storage.sectors[0], value_count, decoded[0], error)) {
+        return false;
+    }
+    std::vector<uint8_t> main_codes;
+    std::vector<uint8_t> selectors;
+    if (!unpack_codes(storage.sectors[0], value_count, main_codes, error) ||
+        !unpack_codes(storage.sectors[1], value_count, selectors, error)) {
+        return false;
+    }
+    decoded[1].resize(value_count);
+    decoded[2].resize(value_count);
+    for (size_t i = 0; i < value_count; ++i) {
+        if (storage.sectors[1].scale == 0.0f && storage.sectors[2].scale == 0.0f && selectors[i] != 0) {
+            return set_error(error, "Residual-parity zero-scale selector is not canonical");
+        }
+        const uint8_t minus_bit = residual_parity_minus_bit(main_codes[i], selectors[i]);
+        decoded[1][i] = storage.sectors[1].scale == 0.0f ? 0.0f :
+            (selectors[i] ? storage.sectors[1].scale : -storage.sectors[1].scale);
+        decoded[2][i] = storage.sectors[2].scale == 0.0f ? 0.0f :
+            (minus_bit ? storage.sectors[2].scale : -storage.sectors[2].scale);
+    }
+    for (size_t view = 0; view < 3; ++view) {
         reconstructed[view] = apply_matrix(rotations.inverse[view], decoded[view], storage.n_vectors, storage.width);
         if (!all_finite(reconstructed[view])) {
             return set_error(error, "Residual-parity reconstruction overflowed");
@@ -733,6 +905,254 @@ llama_tq_residual_parity_budget llama_tq_residual_parity_measure(const llama_tq_
                                 budget.sector_payload_bits[2]) /
             channels;
         budget.actual_bits_per_channel = static_cast<double>(budget.total_bytes * 8) / channels;
+        budget.five_bit_target_met = budget.actual_bits_per_channel <= 5.0;
     }
+    return budget;
+}
+
+bool llama_tq_residual_parity_encode_fixed_f32(
+        const std::vector<float> & values,
+        size_t n_vectors,
+        size_t width,
+        const llama_tq_rotation_bundle & rotations,
+        const llama_tq_residual_parity_fixed_config & config,
+        llama_tq_residual_parity_fixed_storage & storage,
+        std::string * error) {
+    size_t value_count = 0;
+    if (n_vectors == 0 || width == 0 || width > std::numeric_limits<uint32_t>::max() ||
+        !checked_product(n_vectors, width, value_count) || values.size() != value_count) {
+        return set_error(error, "Residual-parity fixed input shape is empty, mismatched, or overflows");
+    }
+    if (!all_finite(values) || !validate_fixed_config(config, error) ||
+        !validate_rotation_bundle(rotations, width, error)) {
+        return false;
+    }
+    const size_t row_bytes =
+        (width * LLAMA_TQ_RESIDUAL_PARITY_PHYSICAL_BITS_PER_CHANNEL + 7) / 8;
+    size_t payload_bytes = 0;
+    if (row_bytes > std::numeric_limits<uint32_t>::max() ||
+        !checked_product(n_vectors, row_bytes, payload_bytes)) {
+        return set_error(error, "Residual-parity fixed payload shape overflows");
+    }
+
+    const std::vector<float> main_rotated = apply_matrix(rotations.forward[0], values, n_vectors, width);
+    if (!all_finite(main_rotated)) {
+        return set_error(error, "Residual-parity fixed main rotation overflowed");
+    }
+    std::vector<float> main_quantized(value_count, 0.0f);
+    for (size_t i = 0; i < value_count; ++i) {
+        const int quantized = std::max(-3, std::min(3,
+            static_cast<int>(std::nearbyint(main_rotated[i] / config.sector_scales[0]))));
+        main_quantized[i] = quantized * config.sector_scales[0];
+    }
+    const std::vector<float> main_reconstructed =
+        apply_matrix(rotations.inverse[0], main_quantized, n_vectors, width);
+    if (!all_finite(main_reconstructed)) {
+        return set_error(error, "Residual-parity fixed main reconstruction overflowed");
+    }
+    std::vector<float> residual(value_count, 0.0f);
+    for (size_t i = 0; i < value_count; ++i) {
+        residual[i] = values[i] - main_reconstructed[i];
+    }
+    const std::vector<float> plus_rotated = apply_matrix(rotations.forward[1], residual, n_vectors, width);
+    const std::vector<float> minus_rotated = apply_matrix(rotations.forward[2], residual, n_vectors, width);
+    if (!all_finite(plus_rotated) || !all_finite(minus_rotated)) {
+        return set_error(error, "Residual-parity fixed residual rotation overflowed");
+    }
+
+    llama_tq_residual_parity_fixed_storage encoded;
+    encoded.n_vectors = n_vectors;
+    encoded.width = width;
+    encoded.row_bytes = row_bytes;
+    encoded.config = config;
+    encoded.payload.assign(payload_bytes, 0);
+    encoded.controller = make_fixed_controller(width, row_bytes, config);
+    for (size_t vector = 0; vector < n_vectors; ++vector) {
+        uint8_t * row = encoded.payload.data() + vector * row_bytes;
+        for (size_t channel = 0; channel < width; ++channel) {
+            const size_t index = vector * width + channel;
+            const int quantized = std::max(-3, std::min(3,
+                static_cast<int>(std::nearbyint(main_rotated[index] / config.sector_scales[0]))));
+            const uint8_t main_code = static_cast<uint8_t>(quantized) & 0x07u;
+            const uint8_t selector = choose_residual_parity_selector(
+                main_code, plus_rotated[index], minus_rotated[index],
+                config.sector_scales[1], config.sector_scales[2], config.beta);
+            pack_fixed_code(row, channel, main_code, selector);
+        }
+    }
+    storage = std::move(encoded);
+    if (error) {
+        error->clear();
+    }
+    return true;
+}
+
+bool llama_tq_residual_parity_validate_fixed_storage(
+        const llama_tq_residual_parity_fixed_storage & storage,
+        std::string * error) {
+    size_t value_count = 0;
+    if (storage.n_vectors == 0 || storage.width == 0 ||
+        storage.width > std::numeric_limits<uint32_t>::max() ||
+        !checked_product(storage.n_vectors, storage.width, value_count)) {
+        return set_error(error, "Residual-parity fixed storage shape is empty or overflows");
+    }
+    if (!validate_fixed_config(storage.config, error)) {
+        return false;
+    }
+    const size_t expected_row_bytes =
+        (storage.width * LLAMA_TQ_RESIDUAL_PARITY_PHYSICAL_BITS_PER_CHANNEL + 7) / 8;
+    size_t expected_payload_bytes = 0;
+    if (storage.row_bytes != expected_row_bytes ||
+        !checked_product(storage.n_vectors, storage.row_bytes, expected_payload_bytes) ||
+        storage.payload.size() != expected_payload_bytes) {
+        return set_error(error, "Residual-parity fixed payload length does not match row shape");
+    }
+    if (storage.controller != make_fixed_controller(storage.width, storage.row_bytes, storage.config)) {
+        return set_error(error, "Residual-parity fixed controller is non-canonical or differs from metadata");
+    }
+    for (size_t vector = 0; vector < storage.n_vectors; ++vector) {
+        if (!validate_fixed_row(storage.payload.data() + vector * storage.row_bytes,
+                                storage.width, storage.row_bytes, error)) {
+            return false;
+        }
+    }
+    if (error) {
+        error->clear();
+    }
+    return true;
+}
+
+bool llama_tq_residual_parity_decode_fixed_strided_f32(
+        const std::vector<uint8_t> & payload,
+        size_t n_stream,
+        size_t n_kv,
+        size_t width,
+        size_t stream_stride_bytes,
+        const llama_tq_rotation_bundle & rotations,
+        const llama_tq_residual_parity_fixed_config & config,
+        std::vector<float> & values,
+        std::string * error) {
+    if (n_stream == 0 || n_kv == 0 || width == 0 ||
+        !validate_fixed_config(config, error) || !validate_rotation_bundle(rotations, width, error)) {
+        if (n_stream == 0 || n_kv == 0 || width == 0) {
+            return set_error(error, "Residual-parity strided decode shape is empty");
+        }
+        return false;
+    }
+    const size_t row_bytes =
+        (width * LLAMA_TQ_RESIDUAL_PARITY_PHYSICAL_BITS_PER_CHANNEL + 7) / 8;
+    size_t stream_payload_bytes = 0;
+    if (!checked_product(n_kv, row_bytes, stream_payload_bytes) || stream_stride_bytes < stream_payload_bytes) {
+        return set_error(error, "Residual-parity stream stride is smaller than its packed rows");
+    }
+    size_t final_stream_offset = 0;
+    if (!checked_product(n_stream - 1, stream_stride_bytes, final_stream_offset) ||
+        final_stream_offset > payload.size() || stream_payload_bytes > payload.size() - final_stream_offset) {
+        return set_error(error, "Residual-parity strided payload is truncated");
+    }
+    size_t row_count = 0;
+    size_t value_count = 0;
+    if (!checked_product(n_stream, n_kv, row_count) || !checked_product(row_count, width, value_count)) {
+        return set_error(error, "Residual-parity strided output shape overflows");
+    }
+
+    std::vector<float> decoded(value_count, 0.0f);
+    std::vector<float> main(width);
+    std::vector<float> plus(width);
+    std::vector<float> minus(width);
+    for (size_t stream = 0; stream < n_stream; ++stream) {
+        for (size_t kv = 0; kv < n_kv; ++kv) {
+            const uint8_t * row = payload.data() + stream * stream_stride_bytes + kv * row_bytes;
+            if (!validate_fixed_row(row, width, row_bytes, error)) {
+                return false;
+            }
+            for (size_t channel = 0; channel < width; ++channel) {
+                const uint8_t code = unpack_fixed_code(row, channel);
+                const uint8_t main_code = code & 0x07u;
+                const int quantized = main_code >= 4u ? static_cast<int>(main_code) - 8 : main_code;
+                const uint8_t selector = (code >> 3) & 1u;
+                const uint8_t minus_bit = residual_parity_minus_bit(main_code, selector);
+                main[channel] = quantized * config.sector_scales[0];
+                plus[channel] = selector ? config.sector_scales[1] : -config.sector_scales[1];
+                minus[channel] = minus_bit ? config.sector_scales[2] : -config.sector_scales[2];
+            }
+            const std::vector<float> main_inverse = apply_matrix(rotations.inverse[0], main, 1, width);
+            const std::vector<float> plus_inverse = apply_matrix(rotations.inverse[1], plus, 1, width);
+            const std::vector<float> minus_inverse = apply_matrix(rotations.inverse[2], minus, 1, width);
+            const size_t output_offset = (stream * n_kv + kv) * width;
+            for (size_t channel = 0; channel < width; ++channel) {
+                const double reconstructed = static_cast<double>(main_inverse[channel]) +
+                    static_cast<double>(config.beta[0]) * plus_inverse[channel] +
+                    static_cast<double>(config.beta[1]) * minus_inverse[channel];
+                if (!std::isfinite(reconstructed) ||
+                    std::fabs(reconstructed) > std::numeric_limits<float>::max()) {
+                    return set_error(error, "Residual-parity fixed final reconstruction overflowed");
+                }
+                decoded[output_offset + channel] = static_cast<float>(reconstructed);
+            }
+        }
+    }
+    values = std::move(decoded);
+    if (error) {
+        error->clear();
+    }
+    return true;
+}
+
+bool llama_tq_residual_parity_decode_fixed_f32(
+        const llama_tq_residual_parity_fixed_storage & storage,
+        const llama_tq_rotation_bundle & rotations,
+        std::vector<float> & values,
+        std::string * error) {
+    if (!llama_tq_residual_parity_validate_fixed_storage(storage, error)) {
+        return false;
+    }
+    size_t stream_stride_bytes = 0;
+    if (!checked_product(storage.n_vectors, storage.row_bytes, stream_stride_bytes)) {
+        return set_error(error, "Residual-parity fixed stream stride overflows");
+    }
+    return llama_tq_residual_parity_decode_fixed_strided_f32(
+        storage.payload, 1, storage.n_vectors, storage.width, stream_stride_bytes,
+        rotations, storage.config, values, error);
+}
+
+llama_tq_residual_parity_production_budget llama_tq_residual_parity_measure_production(
+        size_t n_layers,
+        size_t n_tokens,
+        size_t logical_channels) {
+    llama_tq_residual_parity_production_budget budget;
+    if (n_layers == 0 || n_tokens == 0 || logical_channels == 0 ||
+        logical_channels > (std::numeric_limits<size_t>::max() - 7) /
+            LLAMA_TQ_RESIDUAL_PARITY_PHYSICAL_BITS_PER_CHANNEL) {
+        return budget;
+    }
+    const size_t row_bytes =
+        (logical_channels * LLAMA_TQ_RESIDUAL_PARITY_PHYSICAL_BITS_PER_CHANNEL + 7) / 8;
+    size_t rows = 0;
+    size_t channels = 0;
+    size_t payload_bytes = 0;
+    size_t controller_bytes = 0;
+    if (!checked_product(n_layers, n_tokens, rows) ||
+        !checked_product(rows, logical_channels, channels) ||
+        !checked_product(rows, row_bytes, payload_bytes) ||
+        !checked_product(n_layers, LLAMA_TQ_RESIDUAL_PARITY_CONTROLLER_BYTES, controller_bytes) ||
+        channels > std::numeric_limits<uint64_t>::max() /
+            LLAMA_TQ_RESIDUAL_PARITY_LOGICAL_BITS_PER_CHANNEL) {
+        return budget;
+    }
+    budget.logical_payload_bits = static_cast<uint64_t>(channels) *
+        LLAMA_TQ_RESIDUAL_PARITY_LOGICAL_BITS_PER_CHANNEL;
+    budget.physical_payload_bytes = payload_bytes;
+    budget.controller_bytes = controller_bytes;
+    if (payload_bytes > std::numeric_limits<uint64_t>::max() - controller_bytes) {
+        return {};
+    }
+    budget.total_bytes = payload_bytes + controller_bytes;
+    budget.logical_payload_bits_per_channel =
+        static_cast<double>(LLAMA_TQ_RESIDUAL_PARITY_LOGICAL_BITS_PER_CHANNEL);
+    budget.physical_payload_bits_per_channel = static_cast<double>(payload_bytes) * 8.0 / channels;
+    budget.actual_bits_per_channel = static_cast<double>(budget.total_bytes) * 8.0 / channels;
+    budget.five_bit_target_met = budget.actual_bits_per_channel <=
+        static_cast<double>(LLAMA_TQ_RESIDUAL_PARITY_LOGICAL_BITS_PER_CHANNEL);
     return budget;
 }

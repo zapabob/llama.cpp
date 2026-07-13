@@ -283,7 +283,13 @@ static const char * cu_get_error_str(CUresult err) {
 #endif // !defined(GGML_USE_HIP) && __CUDA_ARCH__ >= GGML_CUDA_CC_AMPERE
 
 #if !defined(GGML_USE_HIP) && __CUDA_ARCH__ >= GGML_CUDA_CC_BLACKWELL && __CUDA_ARCH__ < GGML_CUDA_CC_RUBIN
-#    define BLACKWELL_MMA_AVAILABLE
+#    if defined(GGML_CUDA_ARCH_HAS_FEATURES)
+#        if __CUDA_ARCH_HAS_FEATURE__(SM100_ALL) || __CUDA_ARCH_HAS_FEATURE__(SM101_ALL) || __CUDA_ARCH_HAS_FEATURE__(SM120_ALL)
+#            define BLACKWELL_MMA_AVAILABLE
+#        endif
+#    else
+#        define BLACKWELL_MMA_AVAILABLE
+#    endif
 #endif // !defined(GGML_USE_HIP) && __CUDA_ARCH__ >= GGML_CUDA_CC_BLACKWELL
 
 #if !defined(GGML_USE_HIP) && __CUDA_ARCH__ >= GGML_CUDA_CC_AMPERE

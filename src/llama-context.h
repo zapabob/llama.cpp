@@ -63,6 +63,7 @@ struct llama_context {
 
     const llama_model   & get_model()   const;
     const llama_cparams & get_cparams() const;
+    const llama_tq_owned_context_config * get_turboquant_config() const;
 
     ggml_backend_sched_t get_sched() const;
 
@@ -157,6 +158,7 @@ struct llama_context {
     bool turboquant_get_last_metrics(llama_tq_consensus_metrics & out, llama_tq_error * err) const;
     void turboquant_reset_metrics();
     void turboquant_mark_started();
+    static bool graph_eval_callback(ggml_tensor * tensor, bool ask, void * user_data);
 
     //
     // state save/load
@@ -305,6 +307,8 @@ private:
 
     llama_tq_context_state turboquant_state;
     llama_tq_telemetry_state turboquant_telemetry;
+    bool graph_eval_user_requested = false;
+    bool graph_eval_turboquant_requested = false;
 
     // decode output (2-dimensional array: [n_outputs][n_vocab])
     buffer_view<float> logits = {nullptr, 0};

@@ -31,18 +31,17 @@ int main() {
         t.assert_true("reference attention succeeds",
                       llama_tq_consensus_attention_f32(query, keys, values, {}, 1, 2, 2, 2, config, result, &error));
 
-        const float                inv_sqrt_two = 1.0f / std::sqrt(2.0f);
         const std::array<float, 3> expected_first{
             {
-             inv_sqrt_two, 1.2f * 2.0f * inv_sqrt_two + 0.1f,
-             0.8f * inv_sqrt_two - 0.2f,
+             1.0f, (2.0f - 0.1f) / 1.2f,
+             (1.0f + 0.2f) / 0.8f,
              }
         };
         const std::array<float, 3> expected_second{
             {
-             2.0f * inv_sqrt_two,
-             1.2f * 4.0f * inv_sqrt_two + 0.1f,
-             -0.8f * inv_sqrt_two - 0.2f,
+             2.0f,
+             (4.0f - 0.1f) / 1.2f,
+             (-1.0f + 0.2f) / 0.8f,
              }
         };
         float consensus_first  = 0.0f;
@@ -55,9 +54,11 @@ int main() {
             consensus_first += config.weights[view] * expected_first[view];
             consensus_second += config.weights[view] * expected_second[view];
         }
-        t.assert_true("first consensus logit matches", std::fabs(result.consensus_logits[0] - consensus_first) < 1e-6f);
+        const float inv_sqrt_two = 1.0f / std::sqrt(2.0f);
+        t.assert_true("first consensus logit matches",
+                      std::fabs(result.consensus_logits[0] - consensus_first * inv_sqrt_two) < 1e-6f);
         t.assert_true("second consensus logit matches",
-                      std::fabs(result.consensus_logits[1] - consensus_second) < 1e-6f);
+                      std::fabs(result.consensus_logits[1] - consensus_second * inv_sqrt_two) < 1e-6f);
         t.assert_equal("one final softmax pass", uint32_t(1), result.softmax_passes);
         t.assert_equal("one final value matmul pass", uint32_t(1), result.value_matmul_passes);
         t.assert_true("probabilities normalize",

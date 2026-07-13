@@ -1104,6 +1104,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "SOLVE_TRI",
     "GATED_DELTA_NET",
     "LIGHTNING_INDEXER",
+    "TQ_TRIALITY_KQ_CONSENSUS",
     "TURBO_WHT",
 
     "UNARY",
@@ -1122,7 +1123,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "GLU",
 };
 
-static_assert(GGML_OP_COUNT == 99, "GGML_OP_COUNT != 99");
+static_assert(GGML_OP_COUNT == 100, "GGML_OP_COUNT != 100");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -1217,6 +1218,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "A X = B, A triangular, solve X",
     "gated_delta_net(q, k, v, g, beta, s)",
     "lightning_indexer(q, k, weights, mask)",
+    "tq_triality_kq_consensus(q, k0, k1, k2)",
     "turbo_wht(a)",
 
     "unary(x)",
@@ -1235,7 +1237,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "glu(x)",
 };
 
-static_assert(GGML_OP_COUNT == 99, "GGML_OP_COUNT != 99");
+static_assert(GGML_OP_COUNT == 100, "GGML_OP_COUNT != 100");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -6345,6 +6347,93 @@ struct ggml_tensor * ggml_lightning_indexer(
     result->src[2] = weights;
     result->src[3] = mask;
 
+    return result;
+}
+
+static bool ggml_tq_triality_k_type(enum ggml_type type) {
+    return type == GGML_TYPE_F32 ||
+           type == GGML_TYPE_F16 ||
+           type == GGML_TYPE_TURBO2_0 ||
+           type == GGML_TYPE_TURBO3_0 ||
+           type == GGML_TYPE_TURBO4_0;
+}
+
+static bool ggml_tq_triality_rotation_shape(
+        const struct ggml_tensor * rotation,
+        int64_t head_dim) {
+    if (rotation == NULL) {
+        return true;
+    }
+    if (rotation->type != GGML_TYPE_F32 || rotation->ne[3] != 1) {
+        return false;
+    }
+    const bool dense =
+        rotation->ne[0] == head_dim &&
+        rotation->ne[1] == head_dim &&
+        rotation->ne[2] == 1;
+    const bool packed =
+        rotation->ne[0] == 8 &&
+        rotation->ne[1] == 8 &&
+        rotation->ne[2] == head_dim / 8;
+    return dense || packed;
+}
+
+struct ggml_tensor * ggml_tq_triality_kq_consensus(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * q,
+        struct ggml_tensor  * k0,
+        struct ggml_tensor  * k1,
+        struct ggml_tensor  * k2,
+        struct ggml_tensor  * r0,
+        struct ggml_tensor  * r1,
+        struct ggml_tensor  * r2,
+        const float           weights[3],
+        const float           bias[3],
+        const float           scale[3],
+        const float           temperature[3]) {
+    GGML_ASSERT(q != NULL && k0 != NULL && k1 != NULL && k2 != NULL);
+    GGML_ASSERT(weights != NULL && bias != NULL && scale != NULL && temperature != NULL);
+    GGML_ASSERT(q->type == GGML_TYPE_F32 || q->type == GGML_TYPE_F16);
+    GGML_ASSERT(q->ne[0] > 0 && q->ne[0] % 8 == 0);
+
+    const int64_t padded_dim = ((q->ne[0] + 127) / 128) * 128;
+    struct ggml_tensor * keys[3] = { k0, k1, k2 };
+    struct ggml_tensor * rotations[3] = { r0, r1, r2 };
+    for (int branch = 0; branch < 3; ++branch) {
+        const struct ggml_tensor * key = keys[branch];
+        GGML_ASSERT(ggml_tq_triality_k_type(key->type));
+        const bool quantized =
+            key->type == GGML_TYPE_TURBO2_0 ||
+            key->type == GGML_TYPE_TURBO3_0 ||
+            key->type == GGML_TYPE_TURBO4_0;
+        GGML_ASSERT(key->ne[0] == (quantized ? padded_dim : q->ne[0]));
+        GGML_ASSERT(key->ne[1] == k0->ne[1]);
+        GGML_ASSERT(key->ne[2] == k0->ne[2]);
+        GGML_ASSERT(key->ne[3] == k0->ne[3]);
+        GGML_ASSERT(q->ne[2] % key->ne[2] == 0);
+        GGML_ASSERT(q->ne[3] % key->ne[3] == 0);
+        GGML_ASSERT(ggml_tq_triality_rotation_shape(rotations[branch], q->ne[0]));
+        GGML_ASSERT(isfinite(weights[branch]));
+        GGML_ASSERT(isfinite(bias[branch]));
+        GGML_ASSERT(isfinite(scale[branch]));
+        GGML_ASSERT(isfinite(temperature[branch]) && temperature[branch] > 0.0f);
+    }
+
+    const int64_t ne[4] = { k0->ne[1], q->ne[1], q->ne[2], q->ne[3] };
+    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, ne);
+    result->op = GGML_OP_TQ_TRIALITY_KQ_CONSENSUS;
+    result->src[0] = q;
+    result->src[1] = k0;
+    result->src[2] = k1;
+    result->src[3] = k2;
+    result->src[4] = r0;
+    result->src[5] = r1;
+    result->src[6] = r2;
+    float * op_params = (float *) result->op_params;
+    memcpy(op_params + 0, weights, 3 * sizeof(float));
+    memcpy(op_params + 3, bias, 3 * sizeof(float));
+    memcpy(op_params + 6, scale, 3 * sizeof(float));
+    memcpy(op_params + 9, temperature, 3 * sizeof(float));
     return result;
 }
 

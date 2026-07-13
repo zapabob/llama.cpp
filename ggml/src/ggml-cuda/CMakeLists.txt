@@ -72,37 +72,19 @@ if (CUDAToolkit_FOUND)
         FetchContent_MakeAvailable(CCCL)
     endif()
 
-    # Replace any plain 12X CUDA architectures with their "architecture-specific" equivalents 12Xa.
-    # 12X is forwards-compatible, 12Xa is not.
-    # Notably the Blackwell FP4 tensor core instructions are not forwards compatible and therefore need 12Xa.
-    # But while 12X vs. 12Xa can be checked in device code there is (to my knowledge) no easy way to do the same check in host code.
-    # So for now just replace all instances of 12X with 12Xa, this should be fine until Rubin is released.
-    foreach(ARCHS IN ITEMS CMAKE_CUDA_ARCHITECTURES CMAKE_CUDA_ARCHITECTURES_NATIVE)
-        set(FIXED_ARCHS "")
-        foreach(ARCH IN LISTS ${ARCHS})
-            if (ARCH MATCHES "^12[0-9](-real|-virtual)?$")
-                string(REGEX REPLACE "^(12[0-9])((-real|-virtual)?)$" "\\1a\\2" FIXED_ARCH ${ARCH})
-                message(STATUS "Replacing ${ARCH} in ${ARCHS} with ${FIXED_ARCH}")
-                list(APPEND FIXED_ARCHS "${FIXED_ARCH}")
-            else()
-                list(APPEND FIXED_ARCHS "${ARCH}")
-            endif()
-        endforeach()
-        set(${ARCHS} ${FIXED_ARCHS})
-    endforeach()
-
-    # If we try to compile a "native" build it will use the 12X architectures and fail.
-    # So we should instead use the native architectures as determined by CMake after replacing 12X with 12Xa.
-    # But if at the time of the build no GPUs are connected at all CMAKE_CUDA_ARCHITECTURES will contain garbage that we should not use.
     if (CMAKE_CUDA_ARCHITECTURES STREQUAL "native" AND CMAKE_CUDA_ARCHITECTURES_NATIVE MATCHES "^[0-9]+(a|f)?(-real|-virtual)?(;[0-9]+(a|f)?(-real|-virtual)?|;)*$")
         set(CMAKE_CUDA_ARCHITECTURES ${CMAKE_CUDA_ARCHITECTURES_NATIVE})
     endif()
     message(STATUS "Using CMAKE_CUDA_ARCHITECTURES=${CMAKE_CUDA_ARCHITECTURES} CMAKE_CUDA_ARCHITECTURES_NATIVE=${CMAKE_CUDA_ARCHITECTURES_NATIVE}")
 
-    file(GLOB   GGML_HEADERS_CUDA "*.cuh")
+    if (CMAKE_CUDA_COMPILER_ID STREQUAL "NVIDIA" AND CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL "12.8")
+        add_compile_definitions(GGML_CUDA_ARCH_HAS_FEATURES)
+    endif()
+
+    file(GLOB   GGML_HEADERS_CUDA CONFIGURE_DEPENDS "*.cuh")
     list(APPEND GGML_HEADERS_CUDA "../../include/ggml-cuda.h")
 
-    file(GLOB   GGML_SOURCES_CUDA "*.cu")
+    file(GLOB   GGML_SOURCES_CUDA CONFIGURE_DEPENDS "*.cu")
     file(GLOB   SRCS "template-instances/fattn-tile*.cu")
     list(APPEND GGML_SOURCES_CUDA ${SRCS})
     file(GLOB   SRCS "template-instances/fattn-mma*.cu")

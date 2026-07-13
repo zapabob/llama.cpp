@@ -10,7 +10,7 @@
 
 namespace {
 
-extern "C" void ggml_vec_dot_tq4_1s_q8_0(
+extern "C" void ggml_vec_dot_tq4_1s_q8_0_generic(
     int n,
     float * s,
     size_t bs,
@@ -164,7 +164,7 @@ int main() {
         quantize_row_q8_0_ref(activation.data(), act_blocks.data(), 64);
 
         float dot = 0.0f;
-        ggml_vec_dot_tq4_1s_q8_0(64, &dot, 0, packed.data(), 0, act_blocks.data(), 0, 1);
+        ggml_vec_dot_tq4_1s_q8_0_generic(64, &dot, 0, packed.data(), 0, act_blocks.data(), 0, 1);
 
         std::vector<float> deq_weights(64, 0.0f);
         std::vector<float> deq_activation(64, 0.0f);

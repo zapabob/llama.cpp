@@ -8,6 +8,7 @@
 #include "llama-turboquant.h"
 #include "llama-vocab.h"
 
+#include <array>
 #include <map>
 #include <memory>
 #include <string>
@@ -615,6 +616,12 @@ struct llama_model {
     // gguf metadata
     std::unordered_map<std::string, std::string> gguf_kv;
     llama_turboquant_gguf_metadata turboquant_metadata;
+    std::vector<std::array<ggml_tensor *, 3>> turboquant_rotations;
+    std::array<ggml_tensor *, 4> turboquant_consensus_tensors = {};
+
+    ggml_tensor * turboquant_rotation(uint32_t il, uint32_t view) const {
+        return il < turboquant_rotations.size() && view < 3 ? turboquant_rotations[il][view] : nullptr;
+    }
 
     // list of devices used in this model
     std::vector<llama_device> devices;

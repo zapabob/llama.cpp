@@ -644,8 +644,10 @@ struct LLM_TN_IMPL {
     const char * const suffix;
     const int bid;
     const int xid;
+    const std::string name_override;
 
     LLM_TN_IMPL(llm_arch arch, llm_tensor tensor, const char * suffix, int bid, int xid);
+    LLM_TN_IMPL(llm_arch arch, llm_tensor tensor, int bid, std::string name_override);
 
     std::string str() const;
 

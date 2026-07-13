@@ -1,4 +1,5 @@
 #include "llama-turboquant.h"
+#include "ggml-backend.h"
 #include "ggml.h"
 #include "gguf.h"
 
@@ -682,6 +683,8 @@ bool parse_triality_schema_v2(
     if (!parse_execution(execution_name, metadata.execution)) {
         return set_error(error, "Triality schema-v2 execution mode is unsupported");
     }
+    const std::string tensor_namespace = metadata.execution == LLAMA_TQ_EXEC_RESIDUAL_PARITY ?
+        "turboquant.residual_parity" : "turboquant.profile." + metadata.profile;
     if (!std::isfinite(metadata.js_fallback_threshold) || metadata.js_fallback_threshold < 0.0f) {
         return set_error(error, "Triality schema-v2 js_fallback_threshold must be finite and non-negative");
     }
@@ -705,7 +708,7 @@ bool parse_triality_schema_v2(
                 return set_error(error, "Triality schema-v2 consensus row contains invalid values");
             }
             row_sum += branch.weight;
-            const std::string rotation_name = "turboquant.profile." + metadata.profile + ".layer." +
+            const std::string rotation_name = tensor_namespace + ".layer." +
                 std::to_string(layer_index) + ".rotation." + views[branch_index];
             if (!require_rotation_tensor(ctx, rotation_name, error)) {
                 return false;
@@ -718,7 +721,7 @@ bool parse_triality_schema_v2(
     for (const char * field : {"weights", "bias", "scale", "temperature"}) {
         if (!require_f32_tensor(
                 ctx,
-                "turboquant.profile." + metadata.profile + ".consensus." + field,
+                tensor_namespace + ".consensus." + field,
                 {3, n_layers},
                 error)) {
             return false;
@@ -748,7 +751,7 @@ bool parse_triality_schema_v2(
             return set_error(error, "enabled NC-KA metadata is incomplete or invalid");
         }
         const size_t coordinate_count = metadata.ncka.coordinate_names.size();
-        const std::string prefix = "turboquant.profile." + metadata.profile + ".ncka.";
+        const std::string prefix = tensor_namespace + ".ncka.";
         if (!require_f32_tensor(ctx, prefix + "fallback_weights", {3}, error)) {
             return false;
         }
@@ -788,6 +791,49 @@ bool parse_triality_schema_v2(
             metadata.urt.moment_degree == 0 || !is_lower_sha256(metadata.urt.moment_manifest_sha256)) {
             return set_error(error, "enabled URT metadata is incomplete, unsupported, or hash-invalid");
         }
+    }
+
+    if (metadata.execution == LLAMA_TQ_EXEC_RESIDUAL_PARITY) {
+        static constexpr const char * profile = "key_only_block_so8_triality_residual_parity";
+        std::vector<uint32_t> sector_bits;
+        std::vector<float> fixed_sector_scales;
+        std::vector<float> beta;
+        auto & residual = metadata.residual_parity;
+        if (!read_required_string(ctx, "hypura.turboquant.triality.residual_parity.mode", residual.mode, error) ||
+            !read_required_u32_array(ctx, "hypura.turboquant.triality.residual_parity.sector_bits", static_cast<size_t>(n_layers) * 3, sector_bits, error) ||
+            !read_required_f32_array(ctx, "hypura.turboquant.triality.residual_parity.fixed_sector_scales", static_cast<size_t>(n_layers) * 3, fixed_sector_scales, error) ||
+            !read_required_f32_array(ctx, "hypura.turboquant.triality.residual_parity.beta", static_cast<size_t>(n_layers) * 2, beta, error) ||
+            !read_required_u32(ctx, "hypura.turboquant.triality.residual_parity.payload_bits_per_channel_milli", residual.payload_bits_per_channel_milli, error) ||
+            !read_required_u32(ctx, "hypura.turboquant.triality.residual_parity.controller_bytes", residual.controller_bytes, error)) {
+            return false;
+        }
+        if (metadata.profile != profile || residual.mode != profile) {
+            return set_error(error, "residual-parity execution requires the canonical production profile and mode");
+        }
+        if (residual.payload_bits_per_channel_milli != 5000 || residual.controller_bytes != 51) {
+            return set_error(error, "residual-parity payload/controller accounting must be exactly 5.000 bits/channel plus 51 bytes/layer");
+        }
+        residual.layers.resize(n_layers);
+        for (uint32_t il = 0; il < n_layers; ++il) {
+            auto & layer = residual.layers[il];
+            for (uint32_t sector = 0; sector < 3; ++sector) {
+                const size_t index = static_cast<size_t>(il) * 3 + sector;
+                if (sector_bits[index] != (sector == 0 ? 3u : 1u) ||
+                    !std::isfinite(fixed_sector_scales[index]) || fixed_sector_scales[index] <= 0.0f) {
+                    return set_error(error, "residual-parity sector rows must use [3,1,1] bits with positive finite fixed scales");
+                }
+                layer.sector_bits[sector] = static_cast<uint8_t>(sector_bits[index]);
+                layer.fixed_sector_scales[sector] = fixed_sector_scales[index];
+            }
+            for (uint32_t residual_index = 0; residual_index < 2; ++residual_index) {
+                const float value = beta[static_cast<size_t>(il) * 2 + residual_index];
+                if (!std::isfinite(value) || value < 0.0f) {
+                    return set_error(error, "residual-parity beta rows must be finite and non-negative");
+                }
+                layer.beta[residual_index] = value;
+            }
+        }
+        residual.present = true;
     }
     return true;
 }
@@ -1027,8 +1073,12 @@ bool llama_turboquant_load_gguf_metadata(
         return true;
     }
     metadata.present = true;
+    if (gguf_get_kv_type(ctx, schema_key) != GGUF_TYPE_UINT32) {
+        metadata.present = false;
+        return set_error(error, "tq_schema_version must be uint32");
+    }
     metadata.schema_version = gguf_get_val_u32(ctx, schema_key);
-    if (metadata.schema_version != 1 && metadata.schema_version != 2) {
+    if (metadata.schema_version != 1) {
         metadata.present = false;
         return set_error(error, "unsupported GGUF TurboQuant schema version");
     }
@@ -1197,16 +1247,25 @@ bool llama_turboquant_load_gguf_metadata(
     metadata.public_cache_type_v = public_cache_type_v;
 
     const int64_t public_schema_key = gguf_find_key(ctx, "hypura.turboquant.schema_version");
-    if (metadata.schema_version == 2) {
+    uint32_t public_schema_version = 1;
+    if (public_schema_key >= 0) {
+        if (gguf_get_kv_type(ctx, public_schema_key) != GGUF_TYPE_UINT32) {
+            metadata = {};
+            return set_error(error, "hypura.turboquant.schema_version must be uint32");
+        }
+        public_schema_version = gguf_get_val_u32(ctx, public_schema_key);
+        if (public_schema_version != 1 && public_schema_version != 2) {
+            metadata = {};
+            return set_error(error, "unsupported hypura.turboquant.schema_version");
+        }
+    }
+    if (public_schema_version == 2) {
         if (!parse_triality_schema_v2(ctx, n_layers, metadata, error)) {
             metadata = {};
             return false;
         }
-    } else if (public_schema_key >= 0 &&
-        (gguf_get_kv_type(ctx, public_schema_key) != GGUF_TYPE_UINT32 || gguf_get_val_u32(ctx, public_schema_key) != 1)) {
-        metadata = {};
-        return set_error(error, "legacy and public TurboQuant schema versions disagree");
     }
+    metadata.public_schema_version = public_schema_version;
 
     return true;
 }
@@ -1300,6 +1359,56 @@ bool llama_turboquant_validate_so8_rotation(
     }
     if (!std::isfinite(det) || std::fabs(det - 1.0) > atol) {
         return set_error(error, "SO(8) rotation determinant check failed");
+    }
+
+    return true;
+}
+
+bool llama_turboquant_validate_so8_rotation_tensor(
+        const ggml_tensor * tensor,
+        float atol,
+        std::string * error) {
+    if (tensor == nullptr) {
+        return set_error(error, "SO(8) rotation tensor is null");
+    }
+    if (tensor->type != GGML_TYPE_F32 || ggml_n_dims(tensor) != 2 || tensor->ne[0] <= 0 ||
+        tensor->ne[0] != tensor->ne[1] || tensor->ne[0] % 8 != 0) {
+        return set_error(error, "SO(8) rotation tensor must be a non-empty square F32 matrix with dimensions divisible by 8");
+    }
+    if (tensor->buffer == nullptr) {
+        return set_error(error, "SO(8) rotation tensor has no loaded backend buffer");
+    }
+
+    const size_t dimension = static_cast<size_t>(tensor->ne[0]);
+    std::vector<float> values(dimension * dimension);
+    ggml_backend_tensor_get(tensor, values.data(), 0, values.size() * sizeof(float));
+
+    for (size_t row = 0; row < dimension; ++row) {
+        for (size_t column = 0; column < dimension; ++column) {
+            const float value = values[row * dimension + column];
+            if (!std::isfinite(value)) {
+                return set_error(error, "SO(8) rotation tensor contains non-finite coefficients");
+            }
+            if (row / 8 != column / 8 && std::fabs(value) > atol) {
+                return set_error(error, "SO(8) rotation tensor contains non-zero off-block coefficients");
+            }
+        }
+    }
+
+    std::vector<float> block(64);
+    for (size_t block_index = 0; block_index < dimension / 8; ++block_index) {
+        for (size_t row = 0; row < 8; ++row) {
+            for (size_t column = 0; column < 8; ++column) {
+                block[row * 8 + column] =
+                    values[(block_index * 8 + row) * dimension + block_index * 8 + column];
+            }
+        }
+        std::string block_error;
+        if (!llama_turboquant_validate_so8_rotation(block, atol, &block_error)) {
+            return set_error(
+                error,
+                "SO(8) rotation tensor block " + std::to_string(block_index) + " failed validation: " + block_error);
+        }
     }
 
     return true;
@@ -1787,7 +1896,7 @@ bool tq_validate_layer(const llama_tq_layer_config & layer, llama_tq_execution e
         weight_sum += branch.weight;
     }
 
-    if (std::fabs(weight_sum - 1.0f) > 1e-5f) {
+    if (std::fabs(weight_sum - 1.0f) > 1e-6f) {
         return tq_set_api_error(err, LLAMA_TQ_ERROR_INVALID_CONFIG, "layer " + std::to_string(layer_index) + " active weights must sum to one");
     }
     if (execution == LLAMA_TQ_EXEC_SINGLE_VIEW && active_count != 1) {
@@ -1818,23 +1927,35 @@ bool llama_tq_context_state::configure(
     if (!tq_execution_is_valid(cfg.execution)) {
         return tq_set_api_error(err, LLAMA_TQ_ERROR_INVALID_CONFIG, "TurboQuant execution mode is invalid");
     }
-    if (cfg.n_layers == 0 || cfg.layers == nullptr) {
+    if (cfg.layers == nullptr) {
         return tq_set_api_error(err, LLAMA_TQ_ERROR_INVALID_CONFIG, "TurboQuant context requires at least one layer configuration");
     }
-    if (model_layer_count_ != 0 && cfg.n_layers != model_layer_count_) {
+    const size_t effective_n_layers = cfg.n_layers == 0 ? model_layer_count_ : cfg.n_layers;
+    if (effective_n_layers == 0) {
+        return tq_set_api_error(err, LLAMA_TQ_ERROR_INVALID_CONFIG, "TurboQuant context requires at least one layer configuration");
+    }
+    if (model_layer_count_ != 0 && effective_n_layers != model_layer_count_) {
         return tq_set_api_error(err, LLAMA_TQ_ERROR_INVALID_CONFIG, "TurboQuant layer count does not match the model");
     }
     if (!std::isfinite(cfg.js_fallback_threshold) || cfg.js_fallback_threshold < 0.0f) {
         return tq_set_api_error(err, LLAMA_TQ_ERROR_INVALID_CONFIG, "js_fallback_threshold must be finite and non-negative");
     }
-    for (size_t i = 0; i < cfg.n_layers; ++i) {
+    for (size_t i = 0; i < effective_n_layers; ++i) {
         if (!tq_validate_layer(cfg.layers[i], cfg.execution, i, err)) {
             return false;
         }
     }
 
     const uint8_t required_view_capacity =
-        cfg.execution == LLAMA_TQ_EXEC_ATTENTION_LOGIT_CONSENSUS || cfg.execution == LLAMA_TQ_EXEC_RESIDUAL_PARITY ? 3 : 1;
+        cfg.execution == LLAMA_TQ_EXEC_ATTENTION_LOGIT_CONSENSUS ? 3 : 1;
+    const bool residual_storage = cfg.execution == LLAMA_TQ_EXEC_RESIDUAL_PARITY;
+    const bool initialized_residual_storage = storage_execution_ == LLAMA_TQ_EXEC_RESIDUAL_PARITY;
+    if (!initialization && residual_storage != initialized_residual_storage) {
+        return tq_set_api_error(
+            err,
+            LLAMA_TQ_ERROR_INVALID_CONFIG,
+            "residual-parity packed storage cannot be reconfigured to or from another execution mode");
+    }
     if (!initialization && required_view_capacity > storage_view_capacity_) {
         return tq_set_api_error(
             err,
@@ -1843,17 +1964,20 @@ bool llama_tq_context_state::configure(
     }
     if (initialization) {
         storage_view_capacity_ = required_view_capacity;
+        storage_execution_ = cfg.execution;
     }
 
     llama_tq_owned_context_config next;
     next.schema_version = cfg.schema_version;
     next.execution = cfg.execution;
-    next.layers.assign(cfg.layers, cfg.layers + cfg.n_layers);
+    next.layers.assign(cfg.layers, cfg.layers + effective_n_layers);
     next.required = cfg.required;
     next.trace_enabled = cfg.trace_enabled;
     next.js_fallback_threshold = cfg.js_fallback_threshold;
+    next.allow_identity_view_fallback = cfg.allow_identity_view_fallback;
     config_ = std::move(next);
     configured_ = true;
+    ++revision_;
     return true;
 }
 
@@ -1879,6 +2003,7 @@ bool llama_tq_context_state::get_config(
     out.required = config_.required;
     out.trace_enabled = config_.trace_enabled;
     out.js_fallback_threshold = config_.js_fallback_threshold;
+    out.allow_identity_view_fallback = config_.allow_identity_view_fallback;
     return true;
 }
 
@@ -1892,4 +2017,20 @@ bool llama_tq_context_state::started() const {
 
 bool llama_tq_context_state::trace_enabled() const {
     return configured_ && config_.trace_enabled;
+}
+
+bool llama_tq_context_state::configured() const {
+    return configured_;
+}
+
+uint8_t llama_tq_context_state::storage_view_capacity() const {
+    return storage_view_capacity_;
+}
+
+uint64_t llama_tq_context_state::revision() const {
+    return revision_;
+}
+
+const llama_tq_owned_context_config * llama_tq_context_state::config() const {
+    return configured_ ? &config_ : nullptr;
 }
