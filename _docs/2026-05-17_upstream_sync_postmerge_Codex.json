@@ -1,0 +1,303 @@
+{
+  "generated_at_utc": "2026-05-17T02:28:25.995854+00:00",
+  "upstream_ref": "upstream/master",
+  "security_reference_url": "https://github.com/ggml-org/llama.cpp/security",
+  "head_sha": "64bd8deb97c9312aad5b1c1d71cfde4b779343cb",
+  "head_short": "64bd8deb9",
+  "upstream_sha": "4f13cb742476d81a6b42a2aa5996e82a478c2481",
+  "upstream_short": "4f13cb742",
+  "head_contains_upstream": true,
+  "upstream_contains_head": false,
+  "fork_only_commits": [
+    "64bd8deb9 merge: upstream ggml-org llama.cpp master 2026-05-17; keep Triality TurboQuant",
+    "afd7fae3b docs: record overwrite install verification",
+    "0f7cd1406 docs: record current sm86 dry-run verification",
+    "7f2e34fcf docs: normalize sm86 compile logs",
+    "a653752e3 fix: follow llama-common target for turboquant",
+    "b6184ab44 docs: clarify dry-run install gap",
+    "d4f87b647 docs: record upstream sync dry-run audit",
+    "68943e967 merge: upstream ggml-org llama.cpp master 2026-05-15; keep Triality TurboQuant",
+    "c3a829452 Emit ELT loop metadata in GGUF exports",
+    "2b4bb412f Merge pull request #15 from zapabob/codex/thetom-triality-two-layer-abi",
+    "a18d78a9d Add two-layer Triality TurboQuant compatibility",
+    "00459dd29 Merge pull request #13 from zapabob/codex/tq4-1s-runtime-reference",
+    "7752eda43 Add Triality ABI and TQ4_1S CUDA closeout",
+    "e3d879699 feat: harden triality ABI and fail closed metadata",
+    "6d7010375 Merge pull request #11 from zapabob/codex/tq4-1s-runtime-reference",
+    "029890e6d feat: add tq4_1s ggml and staged cuda support",
+    "9afc55fb4 Add TQ4_1S runtime reference coverage",
+    "582360b05 Merge pull request #9 from zapabob/codex/llama-upstream-sync-2026-04-19",
+    "0bdd17182 fix: keep gemma4 mtmd weights on host buffers",
+    "53cc20f7e merge: upstream ggml-org/llama.cpp master; keep Triality/TurboQuant",
+    "9276d42f4 Merge pull request #8 from zapabob/codex/ignore-triality-aux-tensors",
+    "0c0d6ae69 fix: ignore auxiliary triality tensors in loader accounting",
+    "fe66971d2 feat: add real-model triality metadata coverage",
+    "0357e9be3 Merge pull request #7 from zapabob/codex/triality-platform-sync",
+    "0b324f250 merge: sync main/master into triality platform branch",
+    "59c9753d6 merge: sync zapabob main and master",
+    "d72bfba09 merge: upstream ggerganov/llama.cpp master; keep Triality/TurboQuant",
+    "745e34731 feat: add qwen turboquant runtime mode gating",
+    "fa5aa4d37 docs: redact usernames in main docs",
+    "025623638 docs: align main with fork runtime integrations",
+    "df3913e92 merge: upstream ggerganov/llama.cpp master; keep Triality/TurboQuant API-aligned",
+    "785678b45 feat(turboquant): default TrialitySO8 rotation",
+    "6c860647e merge: upstream ggerganov/llama.cpp master; keep Triality/TurboQuant",
+    "c5543a46f Merge pull request #5 from zapabob/Turboquant",
+    "ac5694dfb Merge branch 'master' into Turboquant",
+    "79a82f4df Merge pull request #4 from zapabob/codex/triality-defaults",
+    "dce830d55 merge: upstream ggerganov/llama.cpp master; keep Triality/TurboQuant",
+    "a5974fd34 merge: upstream ggerganov/llama.cpp master; keep Triality/TurboQuant base",
+    "1cbcf81b1 docs: add zapabob/multiscreen-pytorch link to related repositories",
+    "dbdd39727 Default GGUF conversion to Q8_0 and Triality metadata",
+    "c4a8f4544 Merge pull request #3 from zapabob/Turboquant",
+    "d8b2ef2f9 Merge pull request #2 from zapabob/codex/triality-gguf-metadata",
+    "ecdaa890f Add Hypura TurboQuant Triality GGUF metadata",
+    "ce3ab3c94 Document TurboQuant support and test environment",
+    "02602f0d7 Merge pull request #1 from zapabob/Turboquant",
+    "abe37ec28 Implement TurboQuant integration with CUDA tooling and runtime configuration"
+  ],
+  "fork_only_files": [
+    "CMakeLists.txt",
+    "README.md",
+    "_docs/2026-04-15_main_alignment_Codex.md",
+    "_docs/2026-04-15_username_redaction_Codex.md",
+    "_docs/2026-04-19_gemma4_mtmd_host_weights_fix_Codex.md",
+    "_docs/2026-04-19_upstream_sync_survey_Codex.json",
+    "_docs/2026-05-03-elt-gguf-metadata-Codex.md",
+    "_docs/2026-05-15_dry_run_sm86_ninja_raw_Codex.txt",
+    "_docs/2026-05-15_goal_audit_Codex.md",
+    "_docs/2026-05-15_installed_runtime_verify_Codex.txt",
+    "_docs/2026-05-15_overwrite_install_Codex.txt",
+    "_docs/2026-05-15_sm86_current_head_actual_build_Codex.txt",
+    "_docs/2026-05-15_sm86_current_head_dryrun_cache_Codex.txt",
+    "_docs/2026-05-15_sm86_current_head_dryrun_targets_Codex.txt",
+    "_docs/2026-05-15_sm86_limited_compile_fixed_Codex.txt",
+    "_docs/2026-05-15_sm86_limited_compile_raw_Codex.txt",
+    "_docs/2026-05-15_sm86_reconfigure_after_api_follow_Codex.txt",
+    "_docs/2026-05-15_sm86_runtime_smoke_Codex.txt",
+    "_docs/2026-05-15_upstream_sync_merge_Codex.json",
+    "_docs/2026-05-15_upstream_sync_postmerge_Codex.json",
+    "_docs/2026-05-15_upstream_sync_survey_Codex.json",
+    "_docs/2026-05-17_upstream_sync_merge_Codex.json",
+    "_docs/2026-05-17_upstream_sync_survey_Codex.json",
+    "conversion/base.py",
+    "convert_hf_to_gguf.py",
+    "ggml/include/ggml.h",
+    "ggml/src/ggml-common.h",
+    "ggml/src/ggml-cpu/arch-fallback.h",
+    "ggml/src/ggml-cpu/ggml-cpu.c",
+    "ggml/src/ggml-cpu/quants.c",
+    "ggml/src/ggml-cpu/quants.h",
+    "ggml/src/ggml-cuda/common.cuh",
+    "ggml/src/ggml-cuda/convert.cu",
+    "ggml/src/ggml-cuda/convert.cuh",
+    "ggml/src/ggml-cuda/ggml-cuda.cu",
+    "ggml/src/ggml-cuda/mmvq.cu",
+    "ggml/src/ggml-cuda/vecdotq.cuh",
+    "ggml/src/ggml-quants.c",
+    "ggml/src/ggml-quants.h",
+    "ggml/src/ggml.c",
+    "gguf-py/gguf/constants.py",
+    "gguf-py/gguf/quants.py",
+    "scripts/merge_llama_cpp_upstream.py",
+    "src/CMakeLists.txt",
+    "src/llama-graph.cpp",
+    "src/llama-kv-cache.cpp",
+    "src/llama-kv-cache.h",
+    "src/llama-model-loader.cpp",
+    "src/llama-turboquant.cpp",
+    "src/llama-turboquant.h",
+    "src/models/qwen35.cpp",
+    "tests/CMakeLists.txt",
+    "tests/test-turboquant-artifact.cpp",
+    "tests/test-turboquant-cuda-kernels.cu",
+    "tests/test-turboquant-gguf-metadata.cpp",
+    "tests/test-turboquant-runtime-reference.cpp",
+    "tests/test_elt_metadata.py",
+    "tools/CMakeLists.txt",
+    "tools/mtmd/clip.cpp",
+    "tools/turboquant/CMakeLists.txt",
+    "tools/turboquant/turboquant.cpp"
+  ],
+  "incoming_upstream_commits_preview": [],
+  "incoming_upstream_files": [],
+  "incoming_api_touch_paths": [],
+  "security_flagged_incoming_commits": [],
+  "protected_paths_ok": true,
+  "merge_policy": {
+    "protected": [
+      {
+        "path": "conversion/base.py",
+        "reason": "Keep Hypura GGUF TurboQuant and ELT metadata embedding on the official converter API."
+      },
+      {
+        "path": "convert_hf_to_gguf.py",
+        "reason": "Keep Hypura GGUF TurboQuant metadata embedding and default knobs."
+      },
+      {
+        "path": "src/llama-kv-cache.cpp",
+        "reason": "Keep KV-cache TurboQuant hooks and env bridge integration."
+      },
+      {
+        "path": "src/llama-kv-cache.h",
+        "reason": "Keep KV-cache TurboQuant wiring and runtime config exposure."
+      },
+      {
+        "path": "src/llama-turboquant.cpp",
+        "reason": "Keep Triality/SO8 runtime helpers unless upstream fully supersedes them."
+      },
+      {
+        "path": "src/llama-turboquant.h",
+        "reason": "Keep Triality/SO8 runtime interface unless upstream fully supersedes it."
+      }
+    ],
+    "prefer_upstream": [
+      {
+        "path": "CMakeLists.txt",
+        "reason": "Prefer upstream build plumbing when equivalent functionality exists."
+      },
+      {
+        "path": "common/**",
+        "reason": "Prefer official common runtime and CLI surfaces when equivalent behavior exists upstream."
+      },
+      {
+        "path": "ggml/include/**",
+        "reason": "Prefer official ggml public headers and re-apply only distinct fork benefits."
+      },
+      {
+        "path": "include/**",
+        "reason": "Prefer official public llama headers and re-apply only distinct fork benefits."
+      },
+      {
+        "path": "src/CMakeLists.txt",
+        "reason": "Prefer upstream build plumbing when equivalent functionality exists."
+      },
+      {
+        "path": "src/llama-graph.cpp",
+        "reason": "Prefer upstream graph/runtime changes, then re-apply only TurboQuant benefits."
+      },
+      {
+        "path": "src/llama-model-loader.cpp",
+        "reason": "Prefer upstream loader fixes, then re-apply only auxiliary tq tensor accounting benefits."
+      },
+      {
+        "path": "tools/CMakeLists.txt",
+        "reason": "Prefer upstream tool wiring when equivalent functionality exists."
+      },
+      {
+        "path": "tools/mtmd/**",
+        "reason": "Prefer official multimodal CLI/runtime behavior and fixes."
+      },
+      {
+        "path": "tools/server/**",
+        "reason": "Prefer official server behavior and fixes."
+      }
+    ],
+    "reinject_benefits": [
+      {
+        "path": "conversion/base.py",
+        "reason": "Re-apply Hypura GGUF metadata injection after upstream converter API changes."
+      },
+      {
+        "path": "convert_hf_to_gguf.py",
+        "reason": "Re-apply Hypura GGUF metadata defaults after upstream converter changes."
+      },
+      {
+        "path": "src/llama-graph.cpp",
+        "reason": "Re-apply TurboQuant runtime hooks on top of upstream graph updates."
+      },
+      {
+        "path": "src/llama-kv-cache.cpp",
+        "reason": "Re-apply KV-cache Triality/SO8 behavior on top of upstream bugfixes."
+      },
+      {
+        "path": "src/llama-kv-cache.h",
+        "reason": "Re-apply KV-cache interface benefits on top of upstream API changes."
+      },
+      {
+        "path": "src/llama-model-loader.cpp",
+        "reason": "Re-apply auxiliary tq tensor accounting after upstream loader changes."
+      },
+      {
+        "path": "tests/test-turboquant-artifact.cpp",
+        "reason": "Keep Triality artifact coverage aligned to upstream runtime changes."
+      },
+      {
+        "path": "tests/test-turboquant-gguf-metadata.cpp",
+        "reason": "Re-apply GGUF metadata coverage after upstream loader/runtime changes."
+      },
+      {
+        "path": "tools/turboquant/turboquant.cpp",
+        "reason": "Keep local TurboQuant utility coverage aligned to upstream tool plumbing."
+      }
+    ]
+  },
+  "fork_policy_overlap": {
+    "protected": [
+      "conversion/base.py",
+      "convert_hf_to_gguf.py",
+      "src/llama-kv-cache.cpp",
+      "src/llama-kv-cache.h",
+      "src/llama-turboquant.cpp",
+      "src/llama-turboquant.h"
+    ],
+    "prefer_upstream": [
+      "CMakeLists.txt",
+      "ggml/include/ggml.h",
+      "src/CMakeLists.txt",
+      "src/llama-graph.cpp",
+      "src/llama-model-loader.cpp",
+      "tools/CMakeLists.txt",
+      "tools/mtmd/clip.cpp"
+    ],
+    "reinject_benefits": [
+      "conversion/base.py",
+      "convert_hf_to_gguf.py",
+      "src/llama-graph.cpp",
+      "src/llama-kv-cache.cpp",
+      "src/llama-kv-cache.h",
+      "src/llama-model-loader.cpp",
+      "tests/test-turboquant-artifact.cpp",
+      "tests/test-turboquant-gguf-metadata.cpp",
+      "tools/turboquant/turboquant.cpp"
+    ]
+  },
+  "incoming_policy_overlap": {
+    "protected": [],
+    "prefer_upstream": [],
+    "reinject_benefits": []
+  },
+  "default_alignment": [
+    {
+      "label": "GGUF outtype default",
+      "path": "convert_hf_to_gguf.py",
+      "expected": "default=\"q8_0\"",
+      "ok": true
+    },
+    {
+      "label": "GGUF TurboQuant mode default",
+      "path": "convert_hf_to_gguf.py",
+      "expected": "default=\"research-kv-split\"",
+      "ok": true
+    },
+    {
+      "label": "GGUF TrialitySO8 rotation default",
+      "path": "convert_hf_to_gguf.py",
+      "expected": "default=\"triality_vector\"",
+      "ok": true
+    },
+    {
+      "label": "Loader auxiliary tq tensor ignore",
+      "path": "src/llama-model-loader.cpp",
+      "expected": "name.rfind(\"tq.\", 0) == 0",
+      "ok": true
+    },
+    {
+      "label": "KV cache TurboQuant runtime bridge",
+      "path": "src/llama-kv-cache.cpp",
+      "expected": "llama_turboquant_runtime_from_env",
+      "ok": true
+    }
+  ],
+  "default_alignment_ok": true
+}

@@ -20,6 +20,7 @@
 #define ggml_vec_dot_q2_0_q8_0_generic ggml_vec_dot_q2_0_q8_0
 #define ggml_vec_dot_tq1_0_q8_K_generic ggml_vec_dot_tq1_0_q8_K
 #define ggml_vec_dot_tq2_0_q8_K_generic ggml_vec_dot_tq2_0_q8_K
+#define ggml_vec_dot_tq4_1s_q8_0_generic ggml_vec_dot_tq4_1s_q8_0
 #define ggml_vec_dot_q2_K_q8_K_generic ggml_vec_dot_q2_K_q8_K
 #define ggml_vec_dot_q3_K_q8_K_generic ggml_vec_dot_q3_K_q8_K
 #define ggml_vec_dot_q4_K_q8_K_generic ggml_vec_dot_q4_K_q8_K

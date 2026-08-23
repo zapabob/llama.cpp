@@ -257,7 +257,7 @@ llama_build_and_test(
     peg-parser/tests.h
 )
 
-if (NOT ${CMAKE_SYSTEM_PROCESSOR} MATCHES "s390x")
+if (NOT "${CMAKE_SYSTEM_PROCESSOR}" MATCHES "s390x")
     set(MODEL_NAME "tinyllamas/stories15M-q4_0.gguf")
     set(MODEL_HASH "SHA256=66967fbece6dbe97886593fdbb73589584927e29119ec31f08090732d1861739")
 else()
@@ -277,6 +277,14 @@ set_tests_properties(test-download-model PROPERTIES FIXTURES_SETUP test-download
 llama_build_and_test(test-thread-safety.cpp ARGS -m "${MODEL_DEST}" -ngl 99 -p "The meaning of life is" -n 128 -c 256 -ub 32 -np 4 -t 2)
 set_tests_properties(test-thread-safety PROPERTIES FIXTURES_REQUIRED test-download-model)
 
+if (NOT WIN32 OR NOT BUILD_SHARED_LIBS)
+    llama_build_and_test(test-turboquant-context-config.cpp ARGS "${MODEL_DEST}")
+    set_tests_properties(test-turboquant-context-config PROPERTIES FIXTURES_REQUIRED test-download-model)
+endif()
+
+llama_build_and_test(test-turboquant-telemetry-live.cpp)
+set_tests_properties(test-turboquant-telemetry-live PROPERTIES LABELS "turboquant;telemetry")
+
 llama_build_and_test(test-arg-parser.cpp)
 llama_build_and_test(test-model-resolution.cpp)
 # the test serves its repos from an httplib server, and the library links it privately
@@ -286,7 +294,8 @@ if (NOT LLAMA_SANITIZE_ADDRESS AND NOT GGML_SCHED_NO_REALLOC)
   # TODO: repair known memory leaks
   llama_build_and_test(test-opt.cpp)
 endif()
-llama_build_and_test(test-backend-ops.cpp)
+llama_build_and_test(test-backend-ops.cpp LABEL nvfp4)
+set_tests_properties(test-backend-ops PROPERTIES LABELS "nvfp4")
 
 llama_build_and_test(test-model-load-cancel.cpp LABEL "model")
 llama_build_and_test(test-autorelease.cpp       LABEL "model")
@@ -298,7 +307,7 @@ llama_build_and_test(test-state-restore-fragmented.cpp LABEL "model" ARGS -m "${
 set_tests_properties(test-state-restore-fragmented PROPERTIES FIXTURES_REQUIRED test-download-model)
 
 # Test state save/load functionality
-llama_build_and_test(test-save-load-state.cpp LABEL "model" ARGS -m "${MODEL_DEST}")
+llama_build_and_test(test-save-load-state.cpp LABEL "model" WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}" ARGS -m "${MODEL_DEST}")
 set_tests_properties(test-save-load-state PROPERTIES FIXTURES_REQUIRED test-download-model)
 
 if (APPLE)
@@ -311,14 +320,92 @@ if (NOT GGML_BACKEND_DL)
     llama_build_and_test(test-quantize-fns.cpp)
     llama_build_and_test(test-quantize-perf.cpp)
     llama_build_and_test(test-rope.cpp)
+    if (NOT WIN32 OR NOT BUILD_SHARED_LIBS)
+        function(llama_tq_reference_test source)
+            get_filename_component(target ${source} NAME_WE)
+            add_executable(${target} ${source} ../src/llama-turboquant-consensus.cpp)
+            target_compile_features(${target} PRIVATE cxx_std_17)
+            if (LLAMA_TESTS_INSTALL)
+                install(TARGETS ${target} RUNTIME)
+            endif()
+            llama_test(${target})
+        endfunction()
+        # These TurboQuant tests reach internal helpers that are not exported from
+        # shared llama.dll builds on Windows.
+        llama_build_and_test(test-turboquant-artifact.cpp LABEL turboquant)
+        set_tests_properties(test-turboquant-artifact PROPERTIES LABELS "turboquant;custom-abi")
+        llama_tq_reference_test(test-turboquant-consensus.cpp)
+        set_tests_properties(test-turboquant-consensus PROPERTIES LABELS "turboquant;triality")
+        llama_build_and_test(test-turboquant-gguf-metadata.cpp LABEL custom-abi)
+        set_tests_properties(test-turboquant-gguf-metadata PROPERTIES LABELS "turboquant;custom-abi")
+        llama_build_and_test(test-turboquant-ka-controller.cpp LABEL turboquant)
+        llama_tq_reference_test(test-turboquant-residual-parity.cpp)
+        set_tests_properties(test-turboquant-residual-parity PROPERTIES LABELS "turboquant;triality")
+        llama_build_and_test(test-turboquant-telemetry.cpp LABEL telemetry)
+        set_tests_properties(test-turboquant-telemetry PROPERTIES LABELS "turboquant;telemetry")
+        llama_tq_reference_test(test-turboquant-triality-kv.cpp)
+        set_tests_properties(test-turboquant-triality-kv PROPERTIES LABELS "turboquant;triality")
+        # This test reaches internal TurboQuant reference helpers that are not exported from
+        # shared llama.dll builds on Windows.
+        llama_build_and_test(test-turboquant-runtime-reference.cpp LABEL turboquant)
+        if (GGML_CUDA)
+            enable_language(CUDA)
+            add_executable(test-turboquant-cuda-kernels test-turboquant-cuda-kernels.cu)
+            get_target_property(GGML_CUDA_TEST_ARCHS ggml-cuda CUDA_ARCHITECTURES)
+            set_property(TARGET test-turboquant-cuda-kernels PROPERTY CUDA_ARCHITECTURES "${GGML_CUDA_TEST_ARCHS}")
+            target_include_directories(test-turboquant-cuda-kernels PRIVATE
+                ${PROJECT_SOURCE_DIR}/ggml/src
+                ${PROJECT_SOURCE_DIR}/ggml/src/ggml-cuda
+            )
+            target_link_libraries(test-turboquant-cuda-kernels PRIVATE llama-common ggml-cuda)
+            if (LLAMA_TESTS_INSTALL)
+                install(TARGETS test-turboquant-cuda-kernels RUNTIME)
+            endif()
+            llama_test(test-turboquant-cuda-kernels LABEL turboquant)
+            set_tests_properties(test-turboquant-cuda-kernels PROPERTIES LABELS "turboquant")
+        endif()
+    endif()
+    add_executable(test-turboquant-ggml-consensus test-turboquant-ggml-consensus.cpp)
+    target_link_libraries(test-turboquant-ggml-consensus PRIVATE ggml)
+    if (GGML_CUDA)
+        find_package(CUDAToolkit REQUIRED)
+        target_compile_definitions(
+            test-turboquant-ggml-consensus
+            PRIVATE TQ_CONSENSUS_CUDA_COMPILER_VERSION="${CUDAToolkit_VERSION}"
+        )
+    endif()
+    if (LLAMA_TESTS_INSTALL)
+        install(TARGETS test-turboquant-ggml-consensus RUNTIME)
+    endif()
+    llama_test(test-turboquant-ggml-consensus LABEL triality)
+    set_tests_properties(test-turboquant-ggml-consensus PROPERTIES LABELS "turboquant;triality")
     llama_build_and_test(test-col2im-1d.cpp)
 endif()
 
+if (GGML_CUDA)
+    enable_language(CUDA)
+    add_executable(test-cuda-sm120-capability test-cuda-sm120-capability.cu)
+    get_target_property(GGML_CUDA_TEST_ARCHS ggml-cuda CUDA_ARCHITECTURES)
+    set_property(TARGET test-cuda-sm120-capability PROPERTY CUDA_ARCHITECTURES "${GGML_CUDA_TEST_ARCHS}")
+    target_compile_options(test-cuda-sm120-capability PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/utf-8>)
+    target_link_libraries(test-cuda-sm120-capability PRIVATE CUDA::cudart)
+    if (LLAMA_TESTS_INSTALL)
+        install(TARGETS test-cuda-sm120-capability RUNTIME)
+    endif()
+    llama_test(test-cuda-sm120-capability LABEL sm120)
+    set_property(TEST test-cuda-sm120-capability APPEND PROPERTY LABELS nvfp4)
+endif()
+
+llama_build_and_test(test-turboquant-c-api.c LABEL custom-abi)
+set_tests_properties(test-turboquant-c-api PROPERTIES LABELS "custom-abi;turboquant")
+
 # libmtmd
-set(LLAMA_TEST_NAME test-mtmd-c-api)
-llama_build_and_test(test-mtmd-c-api.c)
-target_link_libraries(${LLAMA_TEST_NAME} PRIVATE mtmd)
-unset(LLAMA_TEST_NAME)
+if (TARGET mtmd)
+    set(LLAMA_TEST_NAME test-mtmd-c-api)
+    llama_build_and_test(test-mtmd-c-api.c)
+    target_link_libraries(${LLAMA_TEST_NAME} PRIVATE mtmd)
+    unset(LLAMA_TEST_NAME)
+endif()
 
 llama_build_and_test(test-mtmd-impl.cpp)
 target_link_libraries(test-mtmd-impl PRIVATE mtmd)

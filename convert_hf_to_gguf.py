@@ -57,8 +57,8 @@ def parse_args() -> argparse.Namespace:
         help="path to write to; default: based on input. {ftype} will be replaced by the outtype.",
     )
     parser.add_argument(
-        "--outtype", type=str, choices=["f32", "f16", "bf16", "q8_0", "tq1_0", "tq2_0", "auto"], default="auto",
-        help="output format - use f32 for float32, f16 for float16, bf16 for bfloat16, q8_0 for Q8_0, tq1_0 or tq2_0 for ternary, and auto for the highest-fidelity 16-bit float type",
+        "--outtype", type=str, choices=["f32", "f16", "bf16", "q8_0", "tq1_0", "tq2_0", "auto"], default="q8_0",
+        help="output format - use f32 for float32, f16 for float16, bf16 for bfloat16, q8_0 for Q8_0, tq1_0 or tq2_0 for ternary, and auto for the highest-fidelity 16-bit float type. Default: q8_0.",
     )
     parser.add_argument(
         "--bigendian", action="store_true",
@@ -164,6 +164,81 @@ def parse_args() -> argparse.Namespace:
             "(e.g. EAGLE3 / DFlash) that needs target-model metadata such as tokenizer, hidden size, and "
             "layer count to populate its GGUF."
         ),
+    )
+    parser.add_argument(
+        "--tq-mode",
+        type=str,
+        choices=["paper-key-only", "research-kv-split"],
+        default="research-kv-split",
+        help=(
+            "choose the internal TurboQuant export preset. "
+            "The embedded GGUF public mode is written as "
+            "paper-faithful or triality-proxy-so8-pareto. "
+            "Default: research-kv-split."
+        ),
+    )
+    parser.add_argument(
+        "--tq-rotation-policy",
+        type=str,
+        choices=[
+            "random_haar",
+            "block_so8_static",
+            "block_so8_learned",
+            "triality_vector",
+            "triality_spinor_plus",
+            "triality_spinor_minus",
+        ],
+        default="triality_vector",
+        help="embed the preferred Hypura TurboQuant rotation policy into GGUF metadata. Default: triality_vector.",
+    )
+    parser.add_argument(
+        "--tq-rotation-seed",
+        type=int,
+        default=0,
+        help="embed the Hypura TurboQuant rotation seed into GGUF metadata",
+    )
+    parser.add_argument(
+        "--tq-triality-mix",
+        type=float,
+        default=None,
+        help="embed the Hypura Triality mix coefficient into GGUF metadata",
+    )
+    parser.add_argument(
+        "--tq-artifact",
+        type=Path,
+        default=None,
+        help="embed an optional Hypura TurboQuant artifact path into GGUF metadata",
+    )
+    parser.add_argument(
+        "--tq-weight-source-ftype",
+        type=str,
+        choices=["bf16", "f16", "q8_0"],
+        default="q8_0",
+        help="embed the canonical source ftype for weight TurboQuant planning. Default: q8_0.",
+    )
+    parser.add_argument(
+        "--tq-weight-policy",
+        type=str,
+        default=None,
+        help="embed the weight TurboQuant policy label into GGUF metadata",
+    )
+    parser.add_argument(
+        "--tq-weight-protected-roles",
+        type=str,
+        default=None,
+        help="embed a JSON list of protected weight roles into GGUF metadata",
+    )
+    parser.add_argument(
+        "--tq-weight-protected-layers",
+        type=str,
+        default=None,
+        help="embed a JSON list of protected layer indices into GGUF metadata",
+    )
+    parser.add_argument(
+        "--tq-weight-modality-scope",
+        type=str,
+        default=None,
+        help="embed the intended modality scope for weight TurboQuant planning",
     )
 
     args = parser.parse_args()
@@ -290,6 +365,16 @@ def main() -> None:
                                      target_model_dir=Path(args.target_model_dir) if args.target_model_dir else None,
                                      fuse_gate_up_exps=args.fuse_gate_up_exps,
                                      fp8_as_q8=args.fp8_as_q8,
+                                     turboquant_mode=args.tq_mode,
+                                     turboquant_rotation_policy=args.tq_rotation_policy,
+                                     turboquant_rotation_seed=args.tq_rotation_seed,
+                                     turboquant_triality_mix=args.tq_triality_mix,
+                                     turboquant_artifact=args.tq_artifact,
+                                     turboquant_weight_source_ftype=args.tq_weight_source_ftype,
+                                     turboquant_weight_policy=args.tq_weight_policy,
+                                     turboquant_weight_protected_roles=args.tq_weight_protected_roles,
+                                     turboquant_weight_protected_layers=args.tq_weight_protected_layers,
+                                     turboquant_weight_modality_scope=args.tq_weight_modality_scope,
                                      )
 
         if args.vocab_only:

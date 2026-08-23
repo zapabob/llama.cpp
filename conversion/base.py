@@ -27,6 +27,7 @@ if 'NO_LOCAL_GGUF' not in os.environ:
     sys.path.insert(1, str(Path(__file__).parent.parent / 'gguf-py'))
 import gguf
 from gguf.vocab import MistralTokenizerType, MistralVocab
+from .turboquant import TurboQuantConversionOptions, validate_turboquant_options
 
 try:
     from mistral_common.tokens.tokenizers.base import TokenizerVersion # type: ignore[import-not-found, ty:unresolved-import]
@@ -101,6 +102,18 @@ class ModelBase:
     dir_model_card: Path
     remote_hf_model_id: str | None
     target_model_dir: Path | None
+    turboquant_mode: str | None
+    turboquant_rotation_policy: str | None
+    turboquant_rotation_seed: int
+    turboquant_triality_mix: float | None
+    turboquant_artifact: Path | None
+    turboquant_weight_enabled: bool
+    turboquant_weight_source_ftype: str | None
+    turboquant_weight_policy: str | None
+    turboquant_weight_protected_roles: str | None
+    turboquant_weight_protected_layers: str | None
+    turboquant_weight_modality_scope: str | None
+    turboquant_options: TurboQuantConversionOptions
 
     # subclasses should define this!
     model_arch: gguf.MODEL_ARCH
@@ -130,7 +143,18 @@ class ModelBase:
                  sentence_transformers_dense_modules: bool = False,
                  target_model_dir: Path | None = None,
                  fuse_gate_up_exps: bool = False,
-                 fp8_as_q8: bool = False):
+                 fp8_as_q8: bool = False,
+                 turboquant_mode: str | None = None,
+                 turboquant_rotation_policy: str | None = None,
+                 turboquant_rotation_seed: int = 0,
+                 turboquant_triality_mix: float | None = None,
+                 turboquant_artifact: Path | None = None,
+                 turboquant_weight_enabled: bool = True,
+                 turboquant_weight_source_ftype: str | None = None,
+                 turboquant_weight_policy: str | None = None,
+                 turboquant_weight_protected_roles: str | None = None,
+                 turboquant_weight_protected_layers: str | None = None,
+                 turboquant_weight_modality_scope: str | None = None):
         if type(self) is ModelBase or \
                 type(self) is TextModel or \
                 type(self) is MmprojModel:
@@ -151,6 +175,31 @@ class ModelBase:
         self.sentence_transformers_dense_modules = sentence_transformers_dense_modules
         self.target_model_dir = target_model_dir
         self.fuse_gate_up_exps = fuse_gate_up_exps
+        self.turboquant_mode = turboquant_mode
+        self.turboquant_rotation_policy = turboquant_rotation_policy
+        self.turboquant_rotation_seed = turboquant_rotation_seed
+        self.turboquant_triality_mix = turboquant_triality_mix
+        self.turboquant_artifact = turboquant_artifact
+        self.turboquant_weight_enabled = turboquant_weight_enabled
+        self.turboquant_weight_source_ftype = turboquant_weight_source_ftype
+        self.turboquant_weight_policy = turboquant_weight_policy
+        self.turboquant_weight_protected_roles = turboquant_weight_protected_roles
+        self.turboquant_weight_protected_layers = turboquant_weight_protected_layers
+        self.turboquant_weight_modality_scope = turboquant_weight_modality_scope
+        self.turboquant_options = TurboQuantConversionOptions(
+            mode=turboquant_mode,
+            rotation_policy=turboquant_rotation_policy,
+            rotation_seed=turboquant_rotation_seed,
+            triality_mix=turboquant_triality_mix,
+            artifact=turboquant_artifact,
+            weight_enabled=bool(turboquant_weight_enabled),
+            weight_source_ftype=turboquant_weight_source_ftype or "q8_0",
+            weight_policy=turboquant_weight_policy,
+            weight_protected_roles=turboquant_weight_protected_roles,
+            weight_protected_layers=turboquant_weight_protected_layers,
+            weight_modality_scope=turboquant_weight_modality_scope,
+        )
+        validate_turboquant_options(self.turboquant_options)
         self._gate_exp_buffer: dict[int, Tensor] = {}
         self._up_exp_buffer: dict[int, Tensor] = {}
         self.hparams = ModelBase.load_hparams(self.dir_model, self.is_mistral_format) if hparams is None else hparams
@@ -1060,6 +1109,273 @@ class ModelBase:
 
         logger.info("Set model quantization version")
         self.gguf_writer.add_quantization_version(gguf.GGML_QUANT_VERSION)
+
+        self.add_elt_metadata()
+        self.add_hypura_turboquant_metadata()
+
+    @staticmethod
+    def _find_first_value(obj: dict[str, Any], keys: Iterable[str], default: Any = None) -> Any:
+        for key in keys:
+            if key in obj and obj[key] is not None:
+                return obj[key]
+        return default
+
+    def _get_elt_metadata_payload(self) -> dict[str, Any] | None:
+        elt_config = self.hparams.get("elt_config")
+        if not isinstance(elt_config, dict):
+            return None
+
+        enabled = bool(self._find_first_value(elt_config, ["loop_enabled", "enabled"], True))
+        required = bool(
+            self._find_first_value(
+                elt_config,
+                ["looped_runtime_required", "loop_required", "required", "requires_loop"],
+                True,
+            )
+        )
+
+        l_min = int(self._find_first_value(elt_config, ["L_min", "l_min", "min_L", "min_loop_count", "n_loop_min"], 1))
+        l_max = int(self._find_first_value(elt_config, ["L_max", "l_max", "max_L", "max_loop_count", "n_loop_max"], l_min))
+        l_default = int(
+            self._find_first_value(
+                elt_config,
+                ["L_default", "l_default", "default_L", "default_loop_count", "n_loop_default"],
+                l_max,
+            )
+        )
+
+        if l_min < 0 or l_max < 0 or l_default < 0:
+            raise ValueError("elt_config loop counts must be non-negative")
+        if l_min > l_max:
+            raise ValueError("elt_config L_min must be <= L_max")
+
+        source_model_id = self._find_first_value(
+            elt_config,
+            ["source_model_id", "base_model_id", "source_model", "base_model"],
+            self.remote_hf_model_id or self.model_name or self.dir_model.name,
+        )
+        backbone_kind = self._find_first_value(
+            elt_config,
+            ["backbone_kind", "backbone", "base_architecture"],
+            gguf.MODEL_ARCH_NAMES[self.model_arch],
+        )
+        turboquant_model_family = self._find_first_value(
+            elt_config,
+            ["turboquant_model_family", "model_family", "loop_model_family"],
+            "ELT/Qwen3.5-looped" if required or l_max > 1 or l_min > 1 else str(source_model_id),
+        )
+
+        return {
+            "schema": str(self._find_first_value(elt_config, ["schema"], "elt.looped_qwen35.v1")),
+            "loop_enabled": enabled,
+            "loop_required": required,
+            "L_min": l_min,
+            "L_max": l_max,
+            "L_default": l_default,
+            "loop_unit": str(self._find_first_value(elt_config, ["loop_unit", "unit", "recurrence_unit"], "layer")),
+            "backbone_kind": str(backbone_kind),
+            "source_model_id": str(source_model_id),
+            "gguf_architecture": str(
+                self._find_first_value(
+                    elt_config,
+                    ["gguf_architecture", "gguf_arch", "runtime_architecture"],
+                    gguf.MODEL_ARCH_NAMES[self.model_arch],
+                )
+            ),
+            "gguf_runtime_status": str(
+                self._find_first_value(
+                    elt_config,
+                    ["gguf_runtime_status", "runtime_status"],
+                    "requires_looped_qwen35_runtime" if required else "plain_qwen35_compatible",
+                )
+            ),
+            "turboquant_model_family": str(turboquant_model_family),
+        }
+
+    def add_elt_metadata(self) -> None:
+        payload = self._get_elt_metadata_payload()
+        if payload is None:
+            return
+
+        self.gguf_writer.add_string("elt.schema", payload["schema"])
+        self.gguf_writer.add_bool("elt.loop.enabled", payload["loop_enabled"])
+        self.gguf_writer.add_bool("elt.loop.required", payload["loop_required"])
+        self.gguf_writer.add_uint32("elt.loop.min", payload["L_min"])
+        self.gguf_writer.add_uint32("elt.loop.max", payload["L_max"])
+        self.gguf_writer.add_uint32("elt.loop.default", payload["L_default"])
+        self.gguf_writer.add_uint32("elt.loop.L_min", payload["L_min"])
+        self.gguf_writer.add_uint32("elt.loop.L_max", payload["L_max"])
+        self.gguf_writer.add_uint32("elt.loop.L_default", payload["L_default"])
+        self.gguf_writer.add_string("elt.loop_unit", payload["loop_unit"])
+        self.gguf_writer.add_string("elt.backbone_kind", payload["backbone_kind"])
+        self.gguf_writer.add_string("elt.source_model_id", payload["source_model_id"])
+        self.gguf_writer.add_string("elt.gguf.architecture", payload["gguf_architecture"])
+        self.gguf_writer.add_string("elt.gguf.runtime_status", payload["gguf_runtime_status"])
+        self.gguf_writer.add_string("elt.model_family", payload["turboquant_model_family"])
+        self.gguf_writer.add_string("elt.loop.model_family", payload["turboquant_model_family"])
+
+    def add_hypura_turboquant_metadata(self) -> None:
+        if self.turboquant_mode is None:
+            return
+
+        public_mode = (
+            "triality-proxy-so8-pareto"
+            if self.turboquant_mode == "research-kv-split"
+            else "paper-faithful"
+        )
+        rotation_policy_alias = self.turboquant_rotation_policy or "triality_vector"
+        triality_view_map = {
+            "triality_vector": "vector",
+            "triality_spinor_plus": "spinor_plus_proxy",
+            "triality_spinor_minus": "spinor_minus_proxy",
+        }
+        triality_view = triality_view_map.get(rotation_policy_alias)
+        artifact_rotation_policy = {
+            "triality_vector": "block_so8_learned",
+            "triality_spinor_plus": "block_so8_learned",
+            "triality_spinor_minus": "block_so8_learned",
+        }.get(rotation_policy_alias, rotation_policy_alias)
+        triality_mode = "triality_proxy" if triality_view is not None else "disabled"
+        source_model_family = self.remote_hf_model_id or self.model_name or self.dir_model.name
+        elt_payload = self._get_elt_metadata_payload()
+        model_family = (
+            elt_payload["turboquant_model_family"]
+            if elt_payload and elt_payload["loop_required"]
+            else source_model_family
+        )
+        normalized_family = " ".join(
+            str(value)
+            for value in [source_model_family, elt_payload.get("source_model_id") if elt_payload else ""]
+            if value
+        ).lower()
+        weight_source_ftype = (self.turboquant_weight_source_ftype or "q8_0").lower()
+        if weight_source_ftype not in {"bf16", "f16", "q8_0"}:
+            raise ValueError(
+                f"Unsupported --tq-weight-source-ftype {weight_source_ftype!r}; expected bf16, f16, or q8_0"
+            )
+
+        if self.turboquant_mode == "research-kv-split":
+            total_bits = 3.5
+            qjl_bits = 1
+            stage1_effective_bits = 2.25
+            runtime_bits_per_channel = 3.25
+            stage1_allocation_scheme = "magnitude-topk"
+        else:
+            total_bits = 2.0
+            qjl_bits = 1
+            stage1_effective_bits = 1.0
+            runtime_bits_per_channel = 2.0
+            stage1_allocation_scheme = "uniform"
+
+        head_count = self.find_hparam(["num_attention_heads", "n_heads", "num_heads"], optional=True)
+        hidden_size = self.find_hparam(["hidden_size", "n_embd", "d_model"], optional=True)
+        if (
+            isinstance(head_count, int)
+            and isinstance(hidden_size, int)
+            and head_count > 0
+            and hidden_size > 0
+            and hidden_size % head_count == 0
+        ):
+            qjl_dim = hidden_size // head_count
+        else:
+            qjl_dim = 128
+
+        block_count = int(getattr(self, "block_count", 0))
+        if block_count > 0:
+            boundary_layers = sorted({0, min(1, block_count - 1), max(0, block_count - 2), block_count - 1})
+        else:
+            boundary_layers = []
+
+        if self.turboquant_weight_protected_layers is not None:
+            protected_layers = json.loads(self.turboquant_weight_protected_layers)
+        else:
+            protected_layers = boundary_layers
+
+        if self.turboquant_weight_protected_roles is not None:
+            protected_roles = json.loads(self.turboquant_weight_protected_roles)
+        elif "qwen" in normalized_family and "3.5-9b" in normalized_family:
+            protected_roles = ["embedding", "norm", "output_head", "recurrent_state"]
+        elif "gemma" in normalized_family and "e4b" in normalized_family:
+            protected_roles = [
+                "vision_encoder",
+                "audio_encoder",
+                "projector",
+                "per_layer_multimodal_embedding",
+                "embedding",
+                "norm",
+                "output_head",
+            ]
+        else:
+            protected_roles = ["embedding", "norm", "output_head"]
+
+        if self.turboquant_weight_policy is not None:
+            weight_policy = self.turboquant_weight_policy
+        elif "qwen" in normalized_family and "3.5-9b" in normalized_family:
+            weight_policy = "qwen35-full-attention-ffn"
+        elif "gemma" in normalized_family and "e4b" in normalized_family:
+            weight_policy = "gemma4-e4b-shared-decoder-hybrid"
+        else:
+            weight_policy = "shared-decoder-role-aware"
+
+        if self.turboquant_weight_modality_scope is not None:
+            weight_modality_scope = self.turboquant_weight_modality_scope
+        elif "gemma" in normalized_family and "e4b" in normalized_family:
+            weight_modality_scope = "full-multimodal"
+        else:
+            weight_modality_scope = "text-only"
+
+        weight_payload: dict[str, Any] = {
+            "enabled": bool(self.turboquant_weight_enabled),
+            "model_family": model_family,
+            "source_ftype": weight_source_ftype,
+            "policy": weight_policy,
+            "protected_roles": protected_roles,
+            "protected_layers": protected_layers,
+            "modality_scope": weight_modality_scope,
+        }
+        if elt_payload:
+            weight_payload["elt"] = elt_payload
+        weight_payload_json = json.dumps(weight_payload, sort_keys=True, separators=(",", ":"))
+
+        n_layers = max(block_count, 1)
+        self.gguf_writer.add_uint32("tq_schema_version", 1)
+        self.gguf_writer.add_array("tq_total_bits", [float(total_bits)] * n_layers)
+        self.gguf_writer.add_array("tq_runtime_bits_per_channel", [float(runtime_bits_per_channel)] * n_layers)
+        self.gguf_writer.add_array("tq_stage1_effective_bits", [float(stage1_effective_bits)] * n_layers)
+        self.gguf_writer.add_array("tq_qjl_bits", [int(qjl_bits)] * n_layers)
+        self.gguf_writer.add_array("tq_qjl_dim", [int(qjl_dim)] * n_layers)
+        self.gguf_writer.add_array("tq_rotation_policy", [artifact_rotation_policy] * n_layers)
+        self.gguf_writer.add_array("tq_rotation_seed", [int(self.turboquant_rotation_seed)] * n_layers)
+        self.gguf_writer.add_array("tq_qjl_seed", [1] * n_layers)
+        self.gguf_writer.add_array("tq_triality_mode", [triality_mode] * n_layers)
+        self.gguf_writer.add_array("tq_triality_view", [triality_view or "none"] * n_layers)
+        self.gguf_writer.add_array("tq_stage1_allocation_scheme", [stage1_allocation_scheme] * n_layers)
+        self.gguf_writer.add_array("tq_stage1_bitwidth_payload_dtype", ["uint8"] * n_layers)
+        self.gguf_writer.add_array("tq_norm_dtype", ["float32"] * n_layers)
+        self.gguf_writer.add_array("tq_sign_pack_format", ["int8_unpacked_binary"] * n_layers)
+
+        self.gguf_writer.add_uint32("hypura.turboquant.schema_version", 1)
+        self.gguf_writer.add_bool("hypura.turboquant.enabled", True)
+        self.gguf_writer.add_string("hypura.turboquant.mode", public_mode)
+        self.gguf_writer.add_uint32("hypura.turboquant.rotation_seed", int(self.turboquant_rotation_seed))
+        self.gguf_writer.add_string("hypura.turboquant.triality_mode", triality_mode)
+        self.gguf_writer.add_string("hypura.turboquant.rotation_policy", rotation_policy_alias)
+        if triality_view is not None:
+            self.gguf_writer.add_string("hypura.turboquant.triality_view", triality_view)
+        if self.turboquant_triality_mix is not None:
+            self.gguf_writer.add_float32("hypura.turboquant.triality_mix", float(self.turboquant_triality_mix))
+        if self.turboquant_artifact is not None:
+            self.gguf_writer.add_string("hypura.turboquant.artifact", str(self.turboquant_artifact))
+
+        self.gguf_writer.add_bool("hypura.turboquant.weight.enabled", bool(self.turboquant_weight_enabled))
+        self.gguf_writer.add_string("hypura.turboquant.weight.source_ftype", weight_source_ftype)
+        self.gguf_writer.add_string("hypura.turboquant.weight.policy", weight_policy)
+        self.gguf_writer.add_string("hypura.turboquant.weight.protected_roles", json.dumps(protected_roles, separators=(",", ":")))
+        self.gguf_writer.add_string("hypura.turboquant.weight.protected_layers", json.dumps(protected_layers, separators=(",", ":")))
+        self.gguf_writer.add_string("hypura.turboquant.weight.modality_scope", weight_modality_scope)
+        self.gguf_writer.add_string("hypura.turboquant.weight.payload_format", "json-inline-v1")
+        self.gguf_writer.add_uint64("hypura.turboquant.weight.payload_bytes", len(weight_payload_json.encode("utf-8")))
+        self.gguf_writer.add_string("hypura.turboquant.weight.payload_json", weight_payload_json)
 
     def write_vocab(self):
         raise NotImplementedError("write_vocab() must be implemented in subclasses")

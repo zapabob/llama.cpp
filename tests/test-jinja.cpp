@@ -2209,12 +2209,16 @@ static void test_template_py(testing & t, const std::string & name, const std::s
         merged["vars"] = vars;
 
 #ifdef _WIN32
-        const char * python_executable = "python.exe";
+        const char * python_executable = "py.exe";
 #else
         const char * python_executable = "python3";
 #endif
 
+#ifdef _WIN32
+        std::vector<std::string> args = {python_executable, "-3", "-c", py_script, };
+#else
         std::vector<std::string> args = {python_executable, "-c", py_script, };
+#endif
 
         common_subproc subprocess;
         int options = subprocess_option_combined_stdout_stderr

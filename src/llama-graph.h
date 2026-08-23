@@ -18,6 +18,9 @@ struct ggml_tensor;
 
 struct llama_cparams;
 struct llama_layer;
+struct llama_model;
+struct llama_tq_owned_context_config;
+struct llama_tq_layer_config;
 
 struct llama_memory_context_i;
 
@@ -785,6 +788,9 @@ struct llm_graph_params {
     const llama_adapter_loras    * loras;
     const llama_memory_context_i * mctx;
     const llama_cross            * cross;
+    const llama_model            * model;
+    const llama_tq_owned_context_config * turboquant;
+    uint64_t turboquant_revision;
 
     std::map<llama_seq_id, llama_sampler *> samplers;
 
@@ -879,7 +885,8 @@ struct llm_graph_params {
             gtype == other.gtype &&
             cvec  == other.cvec  &&
             loras == other.loras &&
-            cross == other.cross;
+            cross == other.cross &&
+            turboquant_revision == other.turboquant_revision;
     }
 };
 
@@ -1025,6 +1032,9 @@ struct llm_graph_context {
     const llama_adapter_loras    * loras;
     const llama_memory_context_i * mctx;
     const llama_cross            * cross;
+    const llama_model            * model;
+    const llama_tq_owned_context_config * turboquant;
+    const uint64_t turboquant_revision;
 
     std::map<llama_seq_id, llama_sampler *> samplers;
 
@@ -1172,7 +1182,13 @@ struct llm_graph_context {
             ggml_tensor * sinks,   // [n_head_q]
             ggml_tensor * v_mla,   // [n_embd_head_v_mla, n_embd_head_v, n_head_v]
                   float   kq_scale,
-                    int   il) const;
+                    int   il,
+            ggml_tensor * tq_k1 = nullptr,
+            ggml_tensor * tq_k2 = nullptr,
+            ggml_tensor * tq_r0 = nullptr,
+            ggml_tensor * tq_r1 = nullptr,
+            ggml_tensor * tq_r2 = nullptr,
+            const llama_tq_layer_config * tq_layer = nullptr) const;
 
     llm_graph_input_attn_no_cache * build_attn_inp_no_cache() const;
 

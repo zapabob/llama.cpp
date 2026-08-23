@@ -10,6 +10,8 @@ file(GLOB LLAMA_MODELS_SOURCES "models/*.cpp")
 
 add_library(llama
             ../include/llama.h
+            ../include/llama-turboquant.h
+            ../include/llama-turboquant-telemetry.h
             llama.cpp
             llama-adapter.cpp
             llama-arch.cpp
@@ -38,6 +40,10 @@ add_library(llama
             llama-model.cpp
             llama-quant.cpp
             llama-sampler.cpp
+            llama-turboquant-consensus.cpp
+            llama-turboquant.cpp
+            llama-turboquant-ka.cpp
+            llama-turboquant-telemetry.cpp
             llama-vocab.cpp
             unicode-data.cpp
             unicode.cpp

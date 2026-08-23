@@ -2,6 +2,7 @@
 
 #include "ggml-cpu.h"
 #include "ggml-impl.h"
+#include "ggml-quants.h"
 #include "binary-ops.h"
 #include "simd-gemm.h"
 #include "ggml.h"
@@ -11,6 +12,10 @@
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
+
+extern "C" {
+GGML_API int turbo3_cpu_wht_group_size;
+}
 
 // ggml_compute_forward_dup
 
@@ -680,6 +685,8 @@ void ggml_compute_forward_add(
         case GGML_TYPE_Q6_K:
         case GGML_TYPE_TQ1_0:
         case GGML_TYPE_TQ2_0:
+        case GGML_TYPE_TQ3_1S:
+        case GGML_TYPE_TQ4_1S:
         case GGML_TYPE_IQ2_XXS:
         case GGML_TYPE_IQ2_XS:
         case GGML_TYPE_IQ3_XXS:
@@ -1132,6 +1139,8 @@ void ggml_compute_forward_add1(
         case GGML_TYPE_Q6_K:
         case GGML_TYPE_TQ1_0:
         case GGML_TYPE_TQ2_0:
+        case GGML_TYPE_TQ3_1S:
+        case GGML_TYPE_TQ4_1S:
         case GGML_TYPE_IQ2_XXS:
         case GGML_TYPE_IQ2_XS:
         case GGML_TYPE_IQ3_XXS:
@@ -1263,6 +1272,8 @@ void ggml_compute_forward_acc(
         case GGML_TYPE_Q6_K:
         case GGML_TYPE_TQ1_0:
         case GGML_TYPE_TQ2_0:
+        case GGML_TYPE_TQ3_1S:
+        case GGML_TYPE_TQ4_1S:
         case GGML_TYPE_IQ2_XXS:
         case GGML_TYPE_IQ2_XS:
         case GGML_TYPE_IQ3_XXS:
@@ -4532,6 +4543,8 @@ void ggml_compute_forward_out_prod(
         case GGML_TYPE_Q6_K:
         case GGML_TYPE_TQ1_0:
         case GGML_TYPE_TQ2_0:
+        case GGML_TYPE_TQ3_1S:
+        case GGML_TYPE_TQ4_1S:
         case GGML_TYPE_IQ2_XXS:
         case GGML_TYPE_IQ2_XS:
         case GGML_TYPE_IQ3_XXS:
@@ -4809,6 +4822,8 @@ void ggml_compute_forward_set(
         case GGML_TYPE_Q6_K:
         case GGML_TYPE_TQ1_0:
         case GGML_TYPE_TQ2_0:
+        case GGML_TYPE_TQ3_1S:
+        case GGML_TYPE_TQ4_1S:
         case GGML_TYPE_IQ2_XXS:
         case GGML_TYPE_IQ2_XS:
         case GGML_TYPE_IQ3_XXS:
@@ -5034,6 +5049,8 @@ void ggml_compute_forward_get_rows(
         case GGML_TYPE_Q6_K:
         case GGML_TYPE_TQ1_0:
         case GGML_TYPE_TQ2_0:
+        case GGML_TYPE_TQ3_1S:
+        case GGML_TYPE_TQ4_1S:
         case GGML_TYPE_IQ2_XXS:
         case GGML_TYPE_IQ2_XS:
         case GGML_TYPE_IQ3_XXS:
@@ -5117,6 +5134,13 @@ static void ggml_compute_forward_set_rows_impl(
     const size_t rs = ggml_row_size(src0->type, nc);
 
     ggml_from_float_t const from_float = ggml_get_type_traits_cpu(dst->type)->from_float;
+
+    // For turbo types: communicate WHT group size to the quantize function via global
+    if (dst->type == GGML_TYPE_TURBO3_0 || dst->type == GGML_TYPE_TURBO4_0 || dst->type == GGML_TYPE_TURBO2_0) {
+        int gs = 0;
+        memcpy(&gs, dst->op_params, sizeof(int));
+        turbo3_cpu_wht_group_size = (gs == 64 || gs == 128) ? gs : 0;
+    }
 
     for (int64_t i03 = 0; i03 < ne03; ++i03) {
         for (int64_t i02 = 0; i02 < ne02; ++i02) {
@@ -5791,6 +5815,11 @@ void ggml_compute_forward_clamp(
         case GGML_TYPE_Q6_K:
         case GGML_TYPE_TQ1_0:
         case GGML_TYPE_TQ2_0:
+        case GGML_TYPE_TQ3_1S:
+        case GGML_TYPE_TQ4_1S:
+        case GGML_TYPE_TURBO2_0:
+        case GGML_TYPE_TURBO3_0:
+        case GGML_TYPE_TURBO4_0:
         case GGML_TYPE_IQ2_XXS:
         case GGML_TYPE_IQ2_XS:
         case GGML_TYPE_IQ3_XXS:
@@ -10961,6 +10990,272 @@ void ggml_compute_forward_gated_delta_net(
     }
 }
 
+// ggml_compute_forward_turbo_wht
+
+// WHT sign arrays (must match Metal shader turbo_wht_signs1/2)
+static const float turbo_wht_s1[128] = {-1,1,1,-1,-1,1,-1,1,-1,-1,1,1,1,1,1,1,1,-1,1,-1,1,-1,-1,1,1,1,-1,1,1,-1,-1,-1,-1,1,1,-1,1,1,-1,1,-1,1,1,-1,-1,1,-1,1,1,1,1,-1,-1,-1,-1,-1,1,-1,1,1,1,1,-1,1,-1,-1,1,-1,-1,-1,1,-1,-1,-1,1,-1,-1,-1,1,1,1,-1,-1,1,1,1,-1,-1,1,1,-1,1,1,-1,1,-1,-1,1,1,-1,1,-1,1,-1,1,1,1,1,-1,1,-1,1,1,-1,1,1,-1,-1,-1,-1,-1,1,1,-1,1,1,-1,1};
+static const float turbo_wht_s2[128] = {1,1,1,1,-1,1,1,-1,1,-1,-1,-1,1,-1,-1,-1,1,1,-1,-1,1,-1,1,-1,1,-1,-1,1,-1,1,1,1,1,1,-1,-1,-1,1,-1,-1,-1,-1,-1,-1,1,1,1,-1,1,-1,1,1,1,-1,-1,1,-1,-1,-1,-1,-1,-1,1,1,1,-1,1,-1,-1,-1,-1,1,-1,1,-1,1,-1,-1,1,1,-1,1,-1,1,1,-1,1,-1,-1,-1,-1,1,-1,-1,1,-1,1,-1,1,1,1,-1,-1,1,-1,1,-1,1,1,-1,-1,1,-1,1,-1,1,1,-1,1,-1,1,-1,-1,-1,-1,-1,1,-1};
+
+static float ggml_tq_triality_load_scalar(const ggml_tensor * tensor, const char * address) {
+    if (tensor->type == GGML_TYPE_F32) {
+        return *(const float *) address;
+    }
+    GGML_ASSERT(tensor->type == GGML_TYPE_F16);
+    return GGML_FP16_TO_FP32(*(const ggml_fp16_t *) address);
+}
+
+static float ggml_tq_triality_load_q(
+        const ggml_tensor * q,
+        int64_t dim,
+        int64_t query,
+        int64_t head,
+        int64_t stream) {
+    const char * address = (const char *) q->data +
+        dim * q->nb[0] + query * q->nb[1] + head * q->nb[2] + stream * q->nb[3];
+    return ggml_tq_triality_load_scalar(q, address);
+}
+
+static float ggml_tq_triality_rotate_q(
+        const ggml_tensor * q,
+        const ggml_tensor * rotation,
+        int64_t dim,
+        int64_t query,
+        int64_t head,
+        int64_t stream) {
+    if (rotation == nullptr) {
+        return ggml_tq_triality_load_q(q, dim, query, head, stream);
+    }
+    const int64_t block = dim / 8;
+    const int64_t row = dim % 8;
+    float value = 0.0f;
+    for (int64_t col = 0; col < 8; ++col) {
+        const int64_t q_dim = block * 8 + col;
+        const char * coefficient_address;
+        if (rotation->ne[0] == q->ne[0]) {
+            coefficient_address = (const char *) rotation->data +
+                q_dim * rotation->nb[0] + dim * rotation->nb[1];
+        } else {
+            coefficient_address = (const char *) rotation->data +
+                col * rotation->nb[0] + row * rotation->nb[1] + block * rotation->nb[2];
+        }
+        value += *(const float *) coefficient_address *
+            ggml_tq_triality_load_q(q, q_dim, query, head, stream);
+    }
+    return value;
+}
+
+static void ggml_tq_triality_dequantize_key_row(
+        const ggml_tensor * key,
+        const char * row,
+        float * output) {
+    switch (key->type) {
+        case GGML_TYPE_TURBO2_0:
+            dequantize_row_turbo2_0((const block_turbo2_0 *) row, output, key->ne[0]);
+            break;
+        case GGML_TYPE_TURBO3_0:
+            dequantize_row_turbo3_0((const block_turbo3_0 *) row, output, key->ne[0]);
+            break;
+        case GGML_TYPE_TURBO4_0:
+            dequantize_row_turbo4_0((const block_turbo4_0 *) row, output, key->ne[0]);
+            break;
+        default:
+            GGML_ABORT("unsupported TurboQuant consensus key type");
+    }
+}
+
+static void ggml_tq_triality_wht(float * values) {
+    for (int64_t i = 0; i < 128; ++i) {
+        values[i] *= turbo_wht_s1[i];
+    }
+    for (int64_t width = 1; width < 128; width *= 2) {
+        for (int64_t base = 0; base < 128; base += 2 * width) {
+            for (int64_t offset = 0; offset < width; ++offset) {
+                const float lhs = values[base + offset];
+                const float rhs = values[base + offset + width];
+                values[base + offset] = lhs + rhs;
+                values[base + offset + width] = lhs - rhs;
+            }
+        }
+    }
+    for (int64_t i = 0; i < 128; ++i) {
+        values[i] *= turbo_wht_s2[i] * 0.08838834764831845f;
+    }
+}
+
+void ggml_compute_forward_tq_triality_kq_consensus(
+        const ggml_compute_params * params,
+        ggml_tensor * dst) {
+    const ggml_tensor * q = dst->src[0];
+    const ggml_tensor * keys[3] = { dst->src[1], dst->src[2], dst->src[3] };
+    const ggml_tensor * rotations[3] = { dst->src[4], dst->src[5], dst->src[6] };
+    const float * op_params = (const float *) dst->op_params;
+    const float * weights = op_params + 0;
+    const float * bias = op_params + 3;
+    const float * scale = op_params + 6;
+
+    GGML_ASSERT(q->nb[0] == ggml_type_size(q->type));
+    GGML_ASSERT(dst->nb[0] == sizeof(float));
+    const int64_t padded_dim = ((q->ne[0] + 127) / 128) * 128;
+    const int64_t n_groups = padded_dim / 128;
+    float * thread_workspace = (float *) params->wdata +
+        params->ith * (128 + padded_dim);
+    float * q_group = thread_workspace;
+    float * key_row_scratch = thread_workspace + 128;
+
+    const int64_t n_outputs = ggml_nelements(dst);
+    const int64_t output_begin = n_outputs * params->ith / params->nth;
+    const int64_t output_end = n_outputs * (params->ith + 1) / params->nth;
+    for (int64_t output_index = output_begin; output_index < output_end; ++output_index) {
+        int64_t remaining = output_index;
+        const int64_t kv = remaining % dst->ne[0];
+        remaining /= dst->ne[0];
+        const int64_t query = remaining % dst->ne[1];
+        remaining /= dst->ne[1];
+        const int64_t head = remaining % dst->ne[2];
+        const int64_t stream = remaining / dst->ne[2];
+
+        float consensus = 0.0f;
+        for (int branch = 0; branch < 3; ++branch) {
+            const ggml_tensor * key = keys[branch];
+            GGML_ASSERT(key->nb[0] == ggml_type_size(key->type));
+            const int64_t key_head = head / (q->ne[2] / key->ne[2]);
+            const int64_t key_stream = stream / (q->ne[3] / key->ne[3]);
+            const char * key_row = (const char *) key->data +
+                kv * key->nb[1] + key_head * key->nb[2] + key_stream * key->nb[3];
+            const bool quantized =
+                key->type == GGML_TYPE_TURBO2_0 ||
+                key->type == GGML_TYPE_TURBO3_0 ||
+                key->type == GGML_TYPE_TURBO4_0;
+            if (quantized) {
+                ggml_tq_triality_dequantize_key_row(key, key_row, key_row_scratch);
+            } else {
+                for (int64_t group = 0; group < n_groups; ++group) {
+                    float * key_group = key_row_scratch + group * 128;
+                    for (int64_t i = 0; i < 128; ++i) {
+                        const int64_t dim = group * 128 + i;
+                        key_group[i] = dim < q->ne[0]
+                            ? ggml_tq_triality_load_scalar(key, key_row + dim * key->nb[0])
+                            : 0.0f;
+                    }
+                    ggml_tq_triality_wht(key_group);
+                }
+            }
+
+            float dot = 0.0f;
+            for (int64_t group = 0; group < n_groups; ++group) {
+                for (int64_t i = 0; i < 128; ++i) {
+                    const int64_t dim = group * 128 + i;
+                    q_group[i] = dim < q->ne[0]
+                        ? ggml_tq_triality_rotate_q(q, rotations[branch], dim, query, head, stream)
+                        : 0.0f;
+                }
+                ggml_tq_triality_wht(q_group);
+                for (int64_t i = 0; i < 128; ++i) {
+                    const int64_t dim = group * 128 + i;
+                    dot += q_group[i] * key_row_scratch[dim];
+                }
+            }
+            consensus += weights[branch] *
+                ((dot - bias[branch]) / fmaxf(scale[branch], 1.0e-6f));
+        }
+
+        char * output = (char *) dst->data +
+            kv * dst->nb[0] + query * dst->nb[1] + head * dst->nb[2] + stream * dst->nb[3];
+        *(float *) output = consensus;
+    }
+}
+
+static void ggml_compute_forward_turbo_wht_f32(
+        const ggml_compute_params * params,
+        ggml_tensor * dst) {
+    const ggml_tensor * src = dst->src[0];
+    const ggml_tensor * scale_tensor = dst->src[1];  // InnerQ scale_inv (may be NULL)
+    const float * src_data = (const float *) src->data;
+    float * dst_data = (float *) dst->data;
+    const float * scale_inv = scale_tensor ? (const float *) scale_tensor->data : NULL;
+
+    int direction;
+    int group_size;
+    memcpy(&direction, dst->op_params + 0, sizeof(int));
+    memcpy(&group_size, dst->op_params + sizeof(int), sizeof(int));
+
+    const int64_t head_dim        = src->ne[0];
+    const int64_t n_heads         = ggml_nelements(src) / head_dim;
+    const int64_t groups_per_head = head_dim / group_size;
+    const int     tail_size       = (int)(head_dim % group_size);
+    const int64_t n_groups        = groups_per_head * n_heads;
+
+    const float inv_sqrt = 1.0f / sqrtf((float)group_size);
+
+    // Parallel over groups
+    const int64_t ith = params->ith;
+    const int64_t nth = params->nth;
+    const int64_t grp_start = (n_groups * ith) / nth;
+    const int64_t grp_end = (n_groups * (ith + 1)) / nth;
+
+    // Select sign arrays: for 64-group, use first 64 elements of the 128-element arrays
+    const float * s_first = (direction == 0) ? turbo_wht_s1 : turbo_wht_s2;
+    const float * s_second = (direction == 0) ? turbo_wht_s2 : turbo_wht_s1;
+
+    for (int64_t g = grp_start; g < grp_end; g++) {
+        const int64_t head_idx    = g / groups_per_head;
+        const int64_t grp_in_head = g % groups_per_head;
+        const int64_t base        = head_idx * head_dim + grp_in_head * group_size;
+
+        float x[128];  // max group_size
+        const float * in = src_data + base;
+
+        // InnerQ forward: apply scale_inv BEFORE signs+WHT (for Q pre-rotation)
+        if (direction == 0 && scale_inv != NULL) {
+            for (int i = 0; i < group_size; i++) x[i] = in[i] * scale_inv[i % group_size];
+        } else {
+            for (int i = 0; i < group_size; i++) x[i] = in[i];
+        }
+
+        // Apply first signs
+        for (int i = 0; i < group_size; i++) x[i] *= s_first[i];
+
+        // WHT butterfly (log2(group_size) stages)
+        for (int h = 1; h < group_size; h *= 2) {
+            for (int i = 0; i < group_size; i += h * 2) {
+                for (int j = i; j < i + h; j++) {
+                    float a = x[j], b = x[j + h];
+                    x[j] = a + b;
+                    x[j + h] = a - b;
+                }
+            }
+        }
+
+        // Normalize + second signs
+        float * out = dst_data + base;
+        for (int i = 0; i < group_size; i++) {
+            float val = x[i] * inv_sqrt * s_second[i];
+            // InnerQ inverse: apply scale_inv AFTER WHT+signs (for V un-rotation)
+            if (direction == 1 && scale_inv != NULL) {
+                val *= scale_inv[i % group_size];
+            }
+            out[i] = val;
+        }
+    }
+
+    // Copy tail elements unchanged (identity pass-through)
+    if (tail_size > 0 && ith == 0) {
+        const int64_t tail_offset = groups_per_head * group_size;
+        for (int64_t h = 0; h < n_heads; h++) {
+            const int64_t base = h * head_dim + tail_offset;
+            memcpy(dst_data + base, src_data + base, tail_size * sizeof(float));
+        }
+    }
+}
+
+void ggml_compute_forward_turbo_wht(
+        const ggml_compute_params * params,
+        ggml_tensor * dst) {
+    switch (dst->src[0]->type) {
+        case GGML_TYPE_F32: ggml_compute_forward_turbo_wht_f32(params, dst); break;
+         default: GGML_ABORT("fatal error");
+    }
+}
 
 // ggml_compute_forward_dsv4_hc_comb
 
@@ -11242,7 +11537,7 @@ void ggml_compute_forward_dsv4_hc_post(
         default:
             {
                 GGML_ABORT("fatal error");
-            }
+        }
     }
 }
 

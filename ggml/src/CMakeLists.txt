@@ -30,7 +30,10 @@ if (GGML_FATAL_WARNINGS)
         list(APPEND C_FLAGS   -Werror)
         list(APPEND CXX_FLAGS -Werror)
     elseif (CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
-        add_compile_options(/WX)
+        add_compile_options(
+            "$<$<COMPILE_LANGUAGE:C,CXX>:/WX>"
+            "$<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/WX>"
+        )
     endif()
 endif()
 
@@ -206,6 +209,7 @@ add_library(ggml-base
             ggml-threading.h
             ggml-quants.c
             ggml-quants.h
+            ggml-turbo-quant.c
             gguf.cpp)
 
 set_target_properties(ggml-base PROPERTIES

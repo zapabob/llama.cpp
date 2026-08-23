@@ -9,6 +9,7 @@
 #include <fstream>
 #include <algorithm>
 #include <functional>
+#include <limits>
 
 // some of the code here is copied from whisper.cpp
 
@@ -94,7 +95,7 @@ void mtmd_audio_cache::fill_mel_filterbank_matrix(int64_t n_mel,
     }
 
     // filterbank
-    std::vector<float> out((size_t)n_mel * (size_t)n_fft_bins, 0);
+    std::vector<float> out((size_t)n_mel * (size_t)n_fft_bins, 0.0f);
     for (int64_t m = 0; m < n_mel; ++m) {
         const double f_left   = hz_pts[m];
         const double f_center = hz_pts[m + 1];
@@ -295,7 +296,7 @@ static void log_mel_spectrogram_worker_thread(int                        ith,
                                               const filter_params &      params,
                                               const mtmd_audio_cache &   cache,
                                               mtmd_audio_mel &           out) {
-    std::vector<float> fft_in(frame_size * 2, 0.0);
+    std::vector<float> fft_in(frame_size * 2, 0.0f);
     std::vector<float> fft_out(frame_size * 2 * 2 * 2);
 
     int64_t n_fft_bins = params.n_fft_bins;
@@ -318,7 +319,7 @@ static void log_mel_spectrogram_worker_thread(int                        ith,
 
         // fill the rest with zeros
         if (valid_len < frame_size) {
-            std::fill(fft_in.begin() + valid_len, fft_in.end(), 0.0);
+            std::fill(fft_in.begin() + valid_len, fft_in.end(), 0.0f);
         }
 
         // FFT
@@ -391,7 +392,7 @@ static bool log_mel_spectrogram(
         n_samples = samples_padded.size();
     } else if (params.center_padding) {
         const auto pad_amount = frame_size / 2;
-        samples_padded = std::vector<float>(n_samples + 2 * pad_amount, 0);
+        samples_padded = std::vector<float>(n_samples + 2 * pad_amount, 0.0f);
         std::copy(samples, samples + n_samples, samples_padded.data() + pad_amount);
         samples = samples_padded.data();
         n_samples = samples_padded.size();
@@ -402,7 +403,7 @@ static bool log_mel_spectrogram(
         samples_padded.resize(n_samples + stage_1_pad + stage_2_pad * 2);
         std::copy(samples, samples + n_samples, samples_padded.begin() + stage_2_pad);
         // pad 30 seconds of zeros at the end of audio (480,000 samples) + reflective pad 200 samples at the end of audio
-        std::fill(samples_padded.begin() + n_samples + stage_2_pad, samples_padded.begin() + n_samples + stage_1_pad + 2 * stage_2_pad, 0);
+        std::fill(samples_padded.begin() + n_samples + stage_2_pad, samples_padded.begin() + n_samples + stage_1_pad + 2 * stage_2_pad, 0.0f);
         // reflective pad 200 samples at the beginning of audio
         if (n_samples < stage_2_pad + 1) {
             // TODO: Handle short audio differently or return error
@@ -1189,7 +1190,7 @@ void mtmd_audio_preprocessor_parakeet::worker_thread(
                              int   n_fft_bins,
           const mtmd_audio_cache & cache,
                   mtmd_audio_mel & mel) {
-    std::vector<float> fft_in(frame_size * 2, 0.0);
+    std::vector<float> fft_in(frame_size * 2, 0.0f);
     std::vector<float> fft_out(frame_size * 2 * 2 * 2);
 
     int n_fb = n_fft_bins;
@@ -1307,6 +1308,10 @@ bool mtmd_audio_preprocessor_parakeet::preprocess(const float * samples,
     out_full.n_len_org = out_full.n_len;
     out_full.data.resize(out_full.n_mel * out_full.n_len);
 
+    GGML_ASSERT(samples_padded.size() <= static_cast<size_t>(std::numeric_limits<int>::max()));
+    const int n_samples = static_cast<int>(samples_padded.size());
+    GGML_ASSERT(params.n_fft_bins >= 0 && params.n_fft_bins <= std::numeric_limits<int>::max());
+    const int n_fft_bins = static_cast<int>(params.n_fft_bins);
     const int n_threads = 4;
     std::vector<std::thread> workers(n_threads - 1);
     for (int iw = 0; iw < n_threads - 1; ++iw) {
@@ -1315,11 +1320,11 @@ bool mtmd_audio_preprocessor_parakeet::preprocess(const float * samples,
             window_func,
             window_size,
             std::cref(samples_padded),
-            samples_padded.size(),
+            n_samples,
             frame_size,
             frame_step,
             n_threads,
-            params.n_fft_bins,
+            n_fft_bins,
             std::cref(cache),
             std::ref(out_full)
         );
@@ -1329,11 +1334,11 @@ bool mtmd_audio_preprocessor_parakeet::preprocess(const float * samples,
             window_func,
             window_size,
             samples_padded,
-            samples_padded.size(),
+            n_samples,
             frame_size,
             frame_step,
             n_threads,
-            params.n_fft_bins,
+            n_fft_bins,
             cache,
             out_full);
 

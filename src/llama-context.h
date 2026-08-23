@@ -7,6 +7,8 @@
 #include "llama-adapter.h"
 #include "llama-impl.h"
 #include "llama-memory.h"
+#include "llama-turboquant.h"
+#include "llama-turboquant-telemetry.h"
 
 #include "ggml-cpp.h"
 #include "ggml-opt.h"
@@ -43,7 +45,9 @@ struct llama_context {
     // init scheduler and compute buffers, reserve worst-case graphs
     llama_context(
             const llama_model & model,
-                  llama_context_params params);
+                  llama_context_params params,
+            const llama_tq_context_config * turboquant_config = nullptr,
+                  llama_tq_error * turboquant_error = nullptr);
 
     ~llama_context();
 
@@ -59,6 +63,7 @@ struct llama_context {
 
     const llama_model   & get_model()   const;
     const llama_cparams & get_cparams() const;
+    const llama_tq_owned_context_config * get_turboquant_config() const;
 
     ggml_backend_sched_t get_sched() const;
 
@@ -142,6 +147,18 @@ struct llama_context {
 
     int encode(const llama_batch & batch_inp);
     int decode(const llama_batch & batch_inp);
+
+    bool turboquant_configure(const llama_tq_context_config & cfg, llama_tq_error * err);
+    bool turboquant_get_config(
+        llama_tq_context_config & out,
+        llama_tq_layer_config * layer_storage,
+        size_t layer_capacity,
+        size_t & n_layers_required,
+        llama_tq_error * err) const;
+    bool turboquant_get_last_metrics(llama_tq_consensus_metrics & out, llama_tq_error * err) const;
+    void turboquant_reset_metrics();
+    void turboquant_mark_started();
+    static bool graph_eval_callback(ggml_tensor * tensor, bool ask, void * user_data);
 
     //
     // state save/load
@@ -287,6 +304,11 @@ private:
     llama_cross cross; // TODO: tmp for handling cross-attention - need something better probably
 
     llama_memory_ptr memory;
+
+    llama_tq_context_state turboquant_state;
+    llama_tq_telemetry_state turboquant_telemetry;
+    bool graph_eval_user_requested = false;
+    bool graph_eval_turboquant_requested = false;
 
     // decode output (2-dimensional array: [n_outputs][n_vocab])
     buffer_view<float> logits = {nullptr, 0};

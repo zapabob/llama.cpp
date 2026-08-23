@@ -558,7 +558,9 @@ struct ggml_backend_meta_split_state llama_meta_device_get_split_state(const str
                     return {{key_dim * (hparams.ssm_d_conv - 1), 2}, {value_dim * (hparams.ssm_d_conv - 1), 1}};
                 }
             } else {
-                const int64_t head_ratio = n_v_heads / n_k_heads;
+                const int64_t head_ratio_i64 = n_v_heads / n_k_heads;
+                GGML_ASSERT(head_ratio_i64 >= 0 && head_ratio_i64 <= UINT32_MAX);
+                const uint32_t head_ratio = static_cast<uint32_t>(head_ratio_i64);
                 if (std::regex_match(tensor_name, pattern_qkv_weight) || std::regex_match(tensor_name, pattern_ssm_conv1d)) {
                     GGML_ASSERT(tensor->ne[axis] == 2*key_dim + value_dim);
                     return {{key_dim, 2 + head_ratio}};
@@ -1297,6 +1299,11 @@ void llama_model_base::load_hparams(llama_model_loader & ml) {
     }
 
     hparams.rope_type = llama_model_rope_type(this);
+
+    std::string turboquant_error;
+    if (!llama_turboquant_load_gguf_metadata(ctx, hparams.n_layer(), turboquant_metadata, &turboquant_error)) {
+        throw std::runtime_error("invalid TurboQuant GGUF contract: " + turboquant_error);
+    }
 }
 
 void llama_model_base::load_vocab(llama_model_loader & ml) {
@@ -1581,6 +1588,38 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
             }
         }
     }
+    if (arch == LLM_ARCH_LLAMA && turboquant_metadata.three_view_bundle) {
+        static constexpr const char * views[3] = {
+            "vector",
+            "spinor_plus_proxy",
+            "spinor_minus_proxy",
+        };
+        static constexpr const char * consensus_fields[4] = {
+            "weights",
+            "bias",
+            "scale",
+            "temperature",
+        };
+        const std::string tensor_namespace = turboquant_metadata.execution == LLAMA_TQ_EXEC_RESIDUAL_PARITY ?
+            "turboquant.residual_parity" : "turboquant.profile." + turboquant_metadata.profile;
+
+        turboquant_rotations.resize(hparams.n_layer());
+        for (uint32_t il = 0; il < hparams.n_layer(); ++il) {
+            const int64_t head_dim = hparams.n_embd_head_k(il);
+            for (uint32_t view = 0; view < 3; ++view) {
+                const std::string name = tensor_namespace + ".layer." +
+                    std::to_string(il) + ".rotation." + views[view];
+                turboquant_rotations[il][view] = create_tensor(
+                    LLM_TN_IMPL(arch, LLM_TENSOR_ATTN_K, il, name), {head_dim, head_dim}, 0);
+            }
+        }
+        for (uint32_t field = 0; field < 4; ++field) {
+            const std::string name = tensor_namespace + ".consensus." + consensus_fields[field];
+            turboquant_consensus_tensors[field] = create_tensor(
+                LLM_TN_IMPL(arch, LLM_TENSOR_ATTN_K, 0, name), {3, hparams.n_layer()}, 0);
+        }
+    }
+
     ml.done_getting_tensors();
 
     // Tied NVFP4 output is valid when no separate LM-head scale tensors are present.
@@ -1722,6 +1761,20 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
     for (auto & [ctx, buf_map] : ctx_buf_maps) {
         if (!ml.load_all_data(ctx, buf_map, use_mlock ? &pimpl->mlock_mmaps : NULL, params.progress_callback, params.progress_callback_user_data)) {
             return false;
+        }
+    }
+
+    for (const auto & layer_rotations : turboquant_rotations) {
+        for (const ggml_tensor * rotation : layer_rotations) {
+            std::string rotation_error;
+            if (!llama_turboquant_validate_so8_rotation_tensor(rotation, 1e-3f, &rotation_error)) {
+                LLAMA_LOG_ERROR(
+                    "%s: invalid TurboQuant rotation tensor '%s': %s\n",
+                    __func__,
+                    rotation != nullptr ? ggml_get_name(rotation) : "<null>",
+                    rotation_error.c_str());
+                return false;
+            }
         }
     }
 
@@ -2526,7 +2579,9 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                                 nullptr,
                                 filter,
                                 nullptr,
-                                nullptr);
+                                nullptr,
+                                params.tq_view_capacity,
+                                params.tq_execution);
                     }
                 }
             }
@@ -2859,6 +2914,55 @@ int32_t llama_model_meta_val_str(const llama_model * model, const char * key, ch
         return -1;
     }
     return snprintf(buf, buf_size, "%s", it->second.c_str());
+}
+
+bool llama_tq_model_get_capabilities(
+        const llama_model * model,
+        llama_tq_model_capabilities * out,
+        llama_tq_error * err) {
+    if (err) {
+        err->code = LLAMA_TQ_ERROR_NONE;
+        err->message[0] = '\0';
+    }
+    if (!model || !out) {
+        if (err) {
+            err->code = LLAMA_TQ_ERROR_INVALID_ARGUMENT;
+            std::snprintf(err->message, sizeof(err->message), "%s", "model and out must be non-null");
+        }
+        return false;
+    }
+
+    *out = {};
+    const auto & metadata = model->turboquant_metadata;
+    out->metadata_present = metadata.present;
+    out->supported_execution_mask = LLAMA_TQ_CAP_SINGLE_VIEW;
+    if (!metadata.present) {
+        return true;
+    }
+    const bool llama_multi_view = model->arch == LLM_ARCH_LLAMA &&
+        model->turboquant_rotations.size() == model->hparams.n_layer();
+    out->three_view_bundle = llama_multi_view;
+    out->ncka_available = false;
+    out->ncka_static_fallback_selected = metadata.ncka.static_fallback_selected;
+    out->urt_available = false;
+    out->schema_version = metadata.public_schema_version;
+    out->n_layers = static_cast<uint32_t>(metadata.layers.size());
+    out->selected_execution = metadata.execution;
+    if (llama_multi_view) {
+        out->supported_execution_mask |= LLAMA_TQ_CAP_BEST_PER_LAYER | LLAMA_TQ_CAP_ATTENTION_LOGIT_CONSENSUS;
+        if (metadata.execution == LLAMA_TQ_EXEC_RESIDUAL_PARITY &&
+            metadata.residual_parity.present && metadata.residual_parity.layers.size() == model->hparams.n_layer()) {
+            bool cpu_layers = true;
+            for (uint32_t il = 0; il < model->hparams.n_layer(); ++il) {
+                cpu_layers = cpu_layers && ggml_backend_dev_type(model->dev_layer(il)) == GGML_BACKEND_DEVICE_TYPE_CPU;
+            }
+            if (cpu_layers) {
+                out->supported_execution_mask |= LLAMA_TQ_CAP_RESIDUAL_PARITY;
+            }
+        }
+    }
+    std::snprintf(out->profile_id, sizeof(out->profile_id), "%s", metadata.profile.c_str());
+    return true;
 }
 
 int32_t llama_model_meta_count(const llama_model * model) {

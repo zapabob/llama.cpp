@@ -702,7 +702,7 @@ static bool handcrafted_check_tensors(const gguf_context * gguf_ctx, const unsig
         for (size_t j = 1; j < GGML_MAX_DIMS; ++j) {
             ne *= shape[j];
         }
-        expected_offset += GGML_PAD(ggml_row_size(type, ne), alignment);
+        expected_offset += GGML_PAD(ggml_row_size(type, ne), static_cast<size_t>(alignment));
     }
 
     return ok;

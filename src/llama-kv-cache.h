@@ -4,7 +4,9 @@
 #include "llama-graph.h"
 #include "llama-kv-cells.h"
 #include "llama-memory.h"
+#include "llama-turboquant.h"
 
+#include <array>
 #include <unordered_map>
 #include <vector>
 
@@ -112,7 +114,9 @@ public:
                llama_memory_t   mem_other,
         const layer_filter_cb & filter,
         const  layer_reuse_cb & reuse,
-        const  layer_share_cb & share);
+        const  layer_share_cb & share,
+                     uint32_t   tq_view_capacity = 1,
+           llama_tq_execution   tq_execution = LLAMA_TQ_EXEC_SINGLE_VIEW);
 
     ~llama_kv_cache() = default;
 
@@ -174,10 +178,21 @@ public:
 
     // get views of the current state of the cache
     ggml_tensor * get_k(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const;
+    ggml_tensor * get_k(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo, uint32_t view) const;
     ggml_tensor * get_v(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const;
+
+    // TurboQuant: get rotation matrices (stored as row-major C arrays)
+    // turbo_rotation = R (forward rotation, for Q pre-rotate-queries)
+    // turbo_rotation_inv = R^T = R^{-1} (inverse rotation, for V output un-rotation)
+    ggml_tensor * get_turbo_rotation() const { return turbo_rotation; }
+    ggml_tensor * get_turbo_rotation_inv() const { return turbo_rotation_inv; }
+
+    // TurboQuant InnerQ: per-channel scale_inv for Q/V equalization
+    ggml_tensor * get_turbo_innerq_scale_inv() const { return turbo_innerq_scale_inv; }
 
     // store k_cur and v_cur in the cache based on the provided head location
     ggml_tensor * cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il, const slot_info & sinfo) const;
+    ggml_tensor * cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il, const slot_info & sinfo, uint32_t view) const;
     ggml_tensor * cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggml_tensor * v_idxs, int32_t il, const slot_info & sinfo) const;
 
     //
@@ -219,9 +234,41 @@ public:
     void set_input_k_rot(ggml_tensor * dst) const;
     void set_input_v_rot(ggml_tensor * dst) const;
 
+    struct tq_residual_storage_info {
+        uint32_t physical_view_count = 0;
+        uint32_t logical_channels = 0;
+        uint32_t row_bytes = 0;
+        size_t physical_payload_bytes = 0;
+        size_t controller_bytes = 0;
+        double logical_payload_bits_per_channel = 0.0;
+        double physical_payload_bits_per_channel = 0.0;
+        double actual_bits_per_channel = 0.0;
+        bool five_bit_target_met = false;
+        bool rows_canonical = false;
+        bool controller_reserved_zero = false;
+    };
+
+    bool tq_get_residual_storage_info(uint32_t il, tq_residual_storage_info & info) const;
+
 private:
     const llama_model & model;
     const llama_hparams & hparams;
+
+    static constexpr uint32_t TQ_RESIDUAL_CONTROLLER_BYTES = 51;
+    static constexpr uint32_t TQ_RESIDUAL_LOGICAL_BITS_PER_CHANNEL = 5;
+    static constexpr uint32_t TQ_RESIDUAL_PHYSICAL_BITS_PER_CHANNEL = 4;
+    static constexpr uint8_t TQ_RESIDUAL_PARITY_COUPLED_LAYOUT = 1;
+
+    struct residual_layer_state {
+        uint32_t logical_channels = 0;
+        uint32_t row_bytes = 0;
+        uint32_t head_dim = 0;
+        uint32_t n_head = 0;
+        std::array<std::vector<float>, 3> rotations;
+        std::array<float, 3> scales{};
+        std::array<float, 2> beta{};
+        std::array<uint8_t, TQ_RESIDUAL_CONTROLLER_BYTES> controller{};
+    };
 
     struct kv_layer {
         // layer index in the model
@@ -233,6 +280,11 @@ private:
 
         std::vector<ggml_tensor *> k_stream;
         std::vector<ggml_tensor *> v_stream;
+
+        std::array<ggml_tensor *, 3> k_views = {};
+        std::array<std::vector<ggml_tensor *>, 3> k_stream_views;
+        std::shared_ptr<residual_layer_state> residual;
+        ggml_tensor * residual_controller = nullptr;
     };
 
     bool v_trans = true;  // the value tensor is transposed
@@ -245,6 +297,9 @@ private:
 
     // SWA
     const uint32_t n_swa = 0;
+
+    const uint32_t tq_view_capacity = 1;
+    const llama_tq_execution tq_execution = LLAMA_TQ_EXEC_SINGLE_VIEW;
 
     // env: LLAMA_ATTN_ROT_DISABLE
     bool attn_rot_k = false;
@@ -260,6 +315,9 @@ private:
 
     // env: LLAMA_KV_CACHE_DEBUG
     int debug = 0;
+    llama_turboquant_runtime_config turboquant_cfg;
+    mutable bool turboquant_logged_k = false;
+    mutable bool turboquant_logged_v = false;
 
     // this is the SWA type of the cache - not to be confused with the model SWA type
     const llama_swa_type swa_type = LLAMA_SWA_TYPE_NONE;
@@ -286,6 +344,13 @@ private:
 
     std::vector<kv_layer> layers;
 
+    // TurboQuant rotation matrices (128x128, row-major stored)
+    ggml_tensor * turbo_rotation = nullptr;      // R (forward rotation)
+    ggml_tensor * turbo_rotation_inv = nullptr;   // R^T = R^{-1} (inverse rotation)
+
+    // TurboQuant InnerQ: per-channel scale_inv for Q/V equalization (128 floats)
+    ggml_tensor * turbo_innerq_scale_inv = nullptr;
+
     // model layer id -> KV cache layer id
     std::unordered_map<int32_t, int32_t> map_layer_ids;
 
@@ -294,12 +359,38 @@ private:
     size_t size_k_bytes() const;
     size_t size_v_bytes() const;
 
+    static void residual_encode_op(
+            ggml_tensor * dst,
+      const ggml_tensor * seed,
+      const ggml_tensor * src,
+                    int   ith,
+                    int   nth,
+                 void *   userdata);
+
+    static void residual_decode_op(
+            ggml_tensor * dst,
+      const ggml_tensor * seed,
+      const ggml_tensor * src,
+                    int   ith,
+                    int   nth,
+                 void *   userdata);
+
+    static void residual_store_rows_op(
+            ggml_tensor * dst,
+      const ggml_tensor * cache,
+      const ggml_tensor * encoded,
+      const ggml_tensor * indices,
+                    int   ith,
+                    int   nth,
+                 void *   userdata);
+
     ggml_tensor * build_rope_shift(
             const llama_cparams & cparams,
                    ggml_context * ctx,
                     ggml_tensor * cur,
                     ggml_tensor * shift,
                     ggml_tensor * rot,
+                    ggml_tensor * tq_rot,
                     ggml_tensor * factors,
                           float   freq_base,
                           float   freq_scale,
@@ -371,7 +462,19 @@ public:
 
     // get views of the current state of the cache
     ggml_tensor * get_k(ggml_context * ctx, int32_t il) const;
+    ggml_tensor * get_k(ggml_context * ctx, int32_t il, uint32_t view) const;
     ggml_tensor * get_v(ggml_context * ctx, int32_t il) const;
+
+    // TurboQuant rotation accessors
+    ggml_tensor * get_turbo_rotation() const;
+    ggml_tensor * get_turbo_rotation_inv() const;
+
+    // Override virtual methods from llama_memory_context_i
+    ggml_tensor * get_turbo_rot_forward() const override;
+    ggml_tensor * get_turbo_rot_inverse() const override;
+
+    // TurboQuant InnerQ: per-channel scale_inv for Q/V equalization
+    ggml_tensor * get_turbo_innerq_scale_inv() const override;
 
     // store k_cur and v_cur in the cache based on the provided head location
     // note: the heads in k_cur and v_cur should be laid out contiguously in memory
@@ -380,6 +483,7 @@ public:
     //   - v_cur  [n_embd_head_v, n_head_v, n_tokens]
     //   - v_idxs [n_tokens] or [n_tokens*n_embd_v_gqa] depending if V cache is transposed
     ggml_tensor * cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il) const;
+    ggml_tensor * cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il, uint32_t view) const;
     ggml_tensor * cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggml_tensor * v_idxs, int32_t il) const;
 
     // create destination indices for each head of the current batch for where it would be written in the KV cache

@@ -2,6 +2,7 @@
 
 #include "common.cuh"
 #include "convert.cuh"
+#include "turbo-quant.cuh"
 #include "vecdotq.cuh"
 
 #include <cstdint>
@@ -143,6 +144,56 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_bf16(
     }
 
     return sum;
+}
+
+template <int D, int nthreads, typename block_t, int qk, float (*dequant_element)(const block_t *, int, float)>
+static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_turbo(
+    const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8, const void * __restrict__ Q_ds_v) {
+
+    const block_t * K_turbo = (const block_t *) K_c;
+    GGML_UNUSED(Q_q8);
+    GGML_UNUSED(Q_ds_v);
+
+    float sum = 0.0f;
+
+#pragma unroll
+    for (int d0 = 0; d0 < D; d0 += 2*nthreads) {
+        const int d = d0 + 2*(nthreads == WARP_SIZE ? threadIdx.x : threadIdx.x % nthreads);
+
+        const int ib = d / qk;
+        const int j  = d % qk;
+        const float norm = __half2float(K_turbo[ib].norm);
+
+#ifdef V_DOT2_F32_F16_AVAILABLE
+        const half2 q = ((const half2 *) Q_v)[d/2];
+        sum += dequant_element(K_turbo + ib, j + 0, norm) * __half2float(__low2half(q));
+        sum += dequant_element(K_turbo + ib, j + 1, norm) * __half2float(__high2half(q));
+#else
+        const float2 q = ((const float2 *) Q_v)[d/2];
+        sum += dequant_element(K_turbo + ib, j + 0, norm) * q.x;
+        sum += dequant_element(K_turbo + ib, j + 1, norm) * q.y;
+#endif // V_DOT2_F32_F16_AVAILABLE
+    }
+
+    return sum;
+}
+
+template <int D, int nthreads>
+static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_turbo2_0(
+    const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8, const void * __restrict__ Q_ds_v) {
+    return vec_dot_fattn_vec_KQ_turbo<D, nthreads, block_turbo2_0, QK_TURBO2, turbo2_dequant_element>(K_c, Q_v, Q_q8, Q_ds_v);
+}
+
+template <int D, int nthreads>
+static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_turbo3_0(
+    const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8, const void * __restrict__ Q_ds_v) {
+    return vec_dot_fattn_vec_KQ_turbo<D, nthreads, block_turbo3_0, QK_TURBO3, turbo3_dequant_element>(K_c, Q_v, Q_q8, Q_ds_v);
+}
+
+template <int D, int nthreads>
+static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_turbo4_0(
+    const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8, const void * __restrict__ Q_ds_v) {
+    return vec_dot_fattn_vec_KQ_turbo<D, nthreads, block_turbo4_0, QK_TURBO4, turbo4_dequant_element>(K_c, Q_v, Q_q8, Q_ds_v);
 }
 
 template<int D, int nthreads>
@@ -617,6 +668,101 @@ static __device__ __forceinline__ void dequantize_V_q8_0(const void * __restrict
     }
 }
 
+template <typename T, int ne>
+static __device__ __forceinline__ void dequantize_V_turbo2_0(const void * __restrict__ vx, void * __restrict__ dst, const int64_t i0) {
+    const block_turbo2_0 * x = (const block_turbo2_0 *) vx;
+
+    const int64_t ib = i0 / QK_TURBO2;
+    const int j0 = i0 % QK_TURBO2;
+    const float norm = __half2float(x[ib].norm);
+
+    static_assert(ne == 4, "turbo2 V dequantization expects four consecutive elements");
+#ifdef FP16_AVAILABLE
+    if constexpr (std::is_same<T, half>::value) {
+#pragma unroll
+        for (int l0 = 0; l0 < ne; l0 += 2) {
+            ((half2 *) dst)[l0/2] = make_half2(
+                turbo2_dequant_element(x + ib, j0 + l0 + 0, norm),
+                turbo2_dequant_element(x + ib, j0 + l0 + 1, norm));
+        }
+    } else
+#endif // FP16_AVAILABLE
+    if constexpr (std::is_same<T, float>::value) {
+#pragma unroll
+        for (int l = 0; l < ne; ++l) {
+            ((float *) dst)[l] = turbo2_dequant_element(x + ib, j0 + l, norm);
+        }
+    } else {
+        static_assert(std::is_same_v<T, void>, "unsupported type");
+    }
+}
+
+template <typename T, int ne>
+static __device__ __forceinline__ void dequantize_V_turbo3_0(const void * __restrict__ vx, void * __restrict__ dst, const int64_t i0) {
+    const block_turbo3_0 * x = (const block_turbo3_0 *) vx;
+
+    const int64_t ib = i0 / QK_TURBO3;
+    const int j0 = i0 % QK_TURBO3;
+    const float norm = __half2float(x[ib].norm);
+
+    static_assert(ne == 4, "turbo3 V dequantization expects four consecutive elements");
+#ifdef FP16_AVAILABLE
+    if constexpr (std::is_same<T, half>::value) {
+#pragma unroll
+        for (int l0 = 0; l0 < ne; l0 += 2) {
+            ((half2 *) dst)[l0/2] = make_half2(
+                turbo3_dequant_element(x + ib, j0 + l0 + 0, norm),
+                turbo3_dequant_element(x + ib, j0 + l0 + 1, norm));
+        }
+    } else
+#endif // FP16_AVAILABLE
+    if constexpr (std::is_same<T, float>::value) {
+#pragma unroll
+        for (int l = 0; l < ne; ++l) {
+            ((float *) dst)[l] = turbo3_dequant_element(x + ib, j0 + l, norm);
+        }
+    } else {
+        static_assert(std::is_same_v<T, void>, "unsupported type");
+    }
+}
+
+template <typename T, int ne>
+static __device__ __forceinline__ void dequantize_V_turbo4_0(const void * __restrict__ vx, void * __restrict__ dst, const int64_t i0) {
+    const block_turbo4_0 * x = (const block_turbo4_0 *) vx;
+
+    const int64_t ib = i0 / QK_TURBO4;
+    const int j0 = i0 % QK_TURBO4;
+    const float norm = __half2float(x[ib].norm);
+
+    static_assert(ne == 2 || ne == 4 || ne == 8, "bad ne");
+
+    float vals[ne];
+#pragma unroll
+    for (int l = 0; l < ne; ++l) {
+        const int     j   = j0 + l;
+        const uint8_t qsb = x[ib].qs[j >> 1];
+        const uint8_t idx = (qsb >> ((j & 1) * 4)) & 0xF;
+        vals[l] = TURBO_CENTROIDS_4BIT[idx] * norm;
+    }
+
+#ifdef FP16_AVAILABLE
+    if constexpr (std::is_same_v<T, half>) {
+#pragma unroll
+        for (int l0 = 0; l0 < ne; l0 += 2) {
+            ((half2 *) dst)[l0/2] = make_half2(__float2half(vals[l0]), __float2half(vals[l0+1]));
+        }
+    } else
+#endif // FP16_AVAILABLE
+    if constexpr (std::is_same_v<T, float>) {
+#pragma unroll
+        for (int l = 0; l < ne; ++l) {
+            ((float *) dst)[l] = vals[l];
+        }
+    } else {
+        static_assert(std::is_same_v<T, void>, "unsupported type");
+    }
+}
+
 template <ggml_type type_K, int D, int nthreads>
 constexpr __device__ vec_dot_KQ_t get_vec_dot_KQ() {
     if constexpr (type_K == GGML_TYPE_F16) {
@@ -633,6 +779,12 @@ constexpr __device__ vec_dot_KQ_t get_vec_dot_KQ() {
         return vec_dot_fattn_vec_KQ_q8_0<D, nthreads>;
     } else if constexpr (type_K == GGML_TYPE_BF16) {
         return vec_dot_fattn_vec_KQ_bf16<D, nthreads>;
+    } else if constexpr (type_K == GGML_TYPE_TURBO2_0) {
+        return vec_dot_fattn_vec_KQ_turbo2_0<D, nthreads>;
+    } else if constexpr (type_K == GGML_TYPE_TURBO3_0) {
+        return vec_dot_fattn_vec_KQ_turbo3_0<D, nthreads>;
+    } else if constexpr (type_K == GGML_TYPE_TURBO4_0) {
+        return vec_dot_fattn_vec_KQ_turbo4_0<D, nthreads>;
     } else {
         static_assert(type_K == -1, "bad type");
         return nullptr;
@@ -655,6 +807,12 @@ constexpr __device__ dequantize_V_t get_dequantize_V() {
         return dequantize_V_q8_0<T, ne>;
     } else if constexpr (type_V == GGML_TYPE_BF16) {
         return dequantize_V_bf16<float, ne>;
+    } else if constexpr (type_V == GGML_TYPE_TURBO2_0) {
+        return dequantize_V_turbo2_0<T, ne>;
+    } else if constexpr (type_V == GGML_TYPE_TURBO3_0) {
+        return dequantize_V_turbo3_0<T, ne>;
+    } else if constexpr (type_V == GGML_TYPE_TURBO4_0) {
+        return dequantize_V_turbo4_0<T, ne>;
     } else {
         static_assert(type_V == -1, "bad type");
         return nullptr;

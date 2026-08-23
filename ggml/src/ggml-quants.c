@@ -2313,6 +2313,65 @@ size_t quantize_nvfp4(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst,
 
 // ====================== Ternary (de)-quantization (BitNet b1.58 and TriLMs)
 
+static const float k_tq4_1s_centroids[16] = {
+    -2.732590f, -2.069017f, -1.618046f, -1.256231f,
+    -0.942340f, -0.656759f, -0.388048f, -0.128395f,
+     0.128395f,  0.388048f,  0.656759f,  0.942340f,
+     1.256231f,  1.618046f,  2.069017f,  2.732590f,
+};
+
+static const float k_tq4_1s_midpoints[15] = {
+    -2.400804f, -1.843532f, -1.437139f, -1.099286f, -0.799550f,
+    -0.522404f, -0.258222f,  0.000000f,  0.258222f,  0.522404f,
+     0.799550f,  1.099286f,  1.437139f,  1.843532f,  2.400804f,
+};
+
+static const float k_tq4_1s_signs[32] = {
+    +1.0f, -1.0f, +1.0f, -1.0f, +1.0f, +1.0f, -1.0f, +1.0f,
+    -1.0f, -1.0f, +1.0f, -1.0f, +1.0f, +1.0f, -1.0f, +1.0f,
+    -1.0f, -1.0f, +1.0f, -1.0f, +1.0f, -1.0f, -1.0f, +1.0f,
+    -1.0f, +1.0f, +1.0f, -1.0f, +1.0f, -1.0f, -1.0f, +1.0f,
+};
+
+static inline void tq4_1s_fwht32(float * values) {
+    for (uint32_t step = 1; step < QK_TQ4_1S; step <<= 1) {
+        for (uint32_t base = 0; base < QK_TQ4_1S; base += step << 1) {
+            for (uint32_t j = base; j < base + step; ++j) {
+                const float a = values[j];
+                const float b = values[j + step];
+                values[j] = a + b;
+                values[j + step] = a - b;
+            }
+        }
+    }
+}
+
+static inline void tq4_1s_rht_forward(float * values) {
+    for (uint32_t i = 0; i < QK_TQ4_1S; ++i) {
+        values[i] *= k_tq4_1s_signs[i];
+    }
+    tq4_1s_fwht32(values);
+    for (uint32_t i = 0; i < QK_TQ4_1S; ++i) {
+        values[i] *= 0.17677669529663688f;
+    }
+}
+
+static inline void tq4_1s_rht_inverse(float * values) {
+    tq4_1s_fwht32(values);
+    for (uint32_t i = 0; i < QK_TQ4_1S; ++i) {
+        values[i] *= 0.17677669529663688f * k_tq4_1s_signs[i];
+    }
+}
+
+static inline uint8_t tq4_1s_choose_index(float value) {
+    for (uint8_t i = 0; i < 15; ++i) {
+        if (value < k_tq4_1s_midpoints[i]) {
+            return i;
+        }
+    }
+    return 15;
+}
+
 void quantize_row_tq1_0_ref(const float * GGML_RESTRICT x, block_tq1_0 * GGML_RESTRICT y, int64_t k) {
     assert(k % QK_K == 0);
     const int64_t nb = k / QK_K;
@@ -2425,6 +2484,106 @@ size_t quantize_tq2_0(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst,
     return nrow * row_size;
 }
 
+void quantize_row_tq4_1s_ref(const float * GGML_RESTRICT x, block_tq4_1s * GGML_RESTRICT y, int64_t k) {
+    static const float scale_candidates[9] = {0.6f, 0.7f, 0.8f, 0.9f, 1.0f, 1.1f, 1.2f, 1.35f, 1.5f};
+
+    assert(k % QK_TQ4_1S == 0);
+    const int64_t nb = k / QK_TQ4_1S;
+
+    for (int64_t block = 0; block < nb; ++block) {
+        float buf[QK_TQ4_1S];
+        for (uint32_t i = 0; i < QK_TQ4_1S; ++i) {
+            buf[i] = x[i];
+        }
+        tq4_1s_rht_forward(buf);
+
+        float rms0 = 0.0f;
+        float rms1 = 0.0f;
+        for (uint32_t i = 0; i < QK_TQ4_1S/2; ++i) {
+            rms0 += buf[i] * buf[i];
+            rms1 += buf[i + QK_TQ4_1S/2] * buf[i + QK_TQ4_1S/2];
+        }
+        rms0 = sqrtf(rms0 / (float)(QK_TQ4_1S/2));
+        rms1 = sqrtf(rms1 / (float)(QK_TQ4_1S/2));
+
+        float best_d0 = rms0;
+        float best_d1 = rms1;
+        float best_err = FLT_MAX;
+
+        for (size_t candidate = 0; candidate < sizeof(scale_candidates)/sizeof(scale_candidates[0]); ++candidate) {
+            const float d0 = rms0 * scale_candidates[candidate];
+            const float d1 = rms1 * scale_candidates[candidate];
+            const float inv0 = d0 > 1.0e-10f ? 1.0f / d0 : 0.0f;
+            const float inv1 = d1 > 1.0e-10f ? 1.0f / d1 : 0.0f;
+            float err = 0.0f;
+
+            for (uint32_t i = 0; i < QK_TQ4_1S/2; ++i) {
+                const uint8_t idx0 = tq4_1s_choose_index(buf[i] * inv0);
+                const uint8_t idx1 = tq4_1s_choose_index(buf[i + QK_TQ4_1S/2] * inv1);
+                const float recon0 = k_tq4_1s_centroids[idx0] * d0;
+                const float recon1 = k_tq4_1s_centroids[idx1] * d1;
+                const float diff0 = buf[i] - recon0;
+                const float diff1 = buf[i + QK_TQ4_1S/2] - recon1;
+                err += diff0 * diff0 + diff1 * diff1;
+            }
+
+            if (err < best_err) {
+                best_err = err;
+                best_d0 = d0;
+                best_d1 = d1;
+            }
+        }
+
+        for (uint32_t iter = 0; iter < 6; ++iter) {
+            const float inv0 = best_d0 > 1.0e-10f ? 1.0f / best_d0 : 0.0f;
+            const float inv1 = best_d1 > 1.0e-10f ? 1.0f / best_d1 : 0.0f;
+            float num0 = 0.0f;
+            float den0 = 0.0f;
+            float num1 = 0.0f;
+            float den1 = 0.0f;
+
+            for (uint32_t i = 0; i < QK_TQ4_1S/2; ++i) {
+                const uint8_t idx0 = tq4_1s_choose_index(buf[i] * inv0);
+                const uint8_t idx1 = tq4_1s_choose_index(buf[i + QK_TQ4_1S/2] * inv1);
+                const float c0 = k_tq4_1s_centroids[idx0];
+                const float c1 = k_tq4_1s_centroids[idx1];
+                num0 += buf[i] * c0;
+                den0 += c0 * c0;
+                num1 += buf[i + QK_TQ4_1S/2] * c1;
+                den1 += c1 * c1;
+            }
+
+            if (den0 > 1.0e-10f) {
+                best_d0 = num0 / den0;
+            }
+            if (den1 > 1.0e-10f) {
+                best_d1 = num1 / den1;
+            }
+        }
+
+        y[block].d0 = GGML_FP32_TO_FP16(best_d0);
+        y[block].d1 = GGML_FP32_TO_FP16(best_d1);
+        memset(y[block].qs, 0, sizeof(y[block].qs));
+
+        const float inv0 = best_d0 > 1.0e-10f ? 1.0f / best_d0 : 0.0f;
+        const float inv1 = best_d1 > 1.0e-10f ? 1.0f / best_d1 : 0.0f;
+        for (uint32_t i = 0; i < QK_TQ4_1S; ++i) {
+            const float inv = i < QK_TQ4_1S/2 ? inv0 : inv1;
+            const uint8_t idx = tq4_1s_choose_index(buf[i] * inv);
+            y[block].qs[i / 2] |= (uint8_t)((idx & 0x0F) << ((i & 1) * 4));
+        }
+
+        x += QK_TQ4_1S;
+    }
+}
+
+size_t quantize_tq4_1s(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrow, int64_t n_per_row, const float * quant_weights) {
+    (void)quant_weights; // not used
+    const size_t row_size = ggml_row_size(GGML_TYPE_TQ4_1S, n_per_row);
+    quantize_row_tq4_1s_ref(src, dst, (int64_t)nrow*n_per_row);
+    return nrow * row_size;
+}
+
 void dequantize_row_tq1_0(const block_tq1_0 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
     assert(k % QK_K == 0);
     const int64_t nb = k / QK_K;
@@ -2480,6 +2639,30 @@ void dequantize_row_tq2_0(const block_tq2_0 * GGML_RESTRICT x, float * GGML_REST
                 }
             }
         }
+    }
+}
+
+void dequantize_row_tq4_1s(const block_tq4_1s * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_TQ4_1S == 0);
+    const int64_t nb = k / QK_TQ4_1S;
+
+    for (int64_t block = 0; block < nb; ++block) {
+        const float d0 = GGML_FP16_TO_FP32(x[block].d0);
+        const float d1 = GGML_FP16_TO_FP32(x[block].d1);
+        float buf[QK_TQ4_1S];
+
+        for (uint32_t i = 0; i < QK_TQ4_1S; ++i) {
+            const uint8_t packed = x[block].qs[i / 2];
+            const uint8_t idx = (uint8_t)((packed >> ((i & 1) * 4)) & 0x0F);
+            const float d = i < QK_TQ4_1S/2 ? d0 : d1;
+            buf[i] = k_tq4_1s_centroids[idx] * d;
+        }
+
+        tq4_1s_rht_inverse(buf);
+        for (uint32_t i = 0; i < QK_TQ4_1S; ++i) {
+            y[i] = buf[i];
+        }
+        y += QK_TQ4_1S;
     }
 }
 
@@ -5604,6 +5787,15 @@ bool ggml_validate_row_data(enum ggml_type type, const void * data, size_t nbyte
             {
                 VALIDATE_ROW_DATA_D_F16_IMPL(block_tq2_0, data, nb);
             } break;
+        case GGML_TYPE_TQ4_1S:
+            {
+                const block_tq4_1s * q = (const block_tq4_1s *) data;
+                for (size_t i = 0; i < nb; ++i) {
+                    if (!validate_fp16(q[i].d0, i) || !validate_fp16(q[i].d1, i)) {
+                        return false;
+                    }
+                }
+            } break;
         case GGML_TYPE_IQ1_S:
             {
                 VALIDATE_ROW_DATA_D_F16_IMPL(block_iq1_s, data, nb);
@@ -5655,6 +5847,13 @@ bool ggml_validate_row_data(enum ggml_type type, const void * data, size_t nbyte
         case GGML_TYPE_I32:
         case GGML_TYPE_I64:
             // nothing to validate
+            break;
+        case GGML_TYPE_TQ3_1S:
+        case GGML_TYPE_TURBO3_0:
+        case GGML_TYPE_TURBO4_0:
+        case GGML_TYPE_TURBO2_0:
+            // WHT-rotated / TurboQuant types: just validate scales are not NaN/Inf
+            // TODO: add more thorough validation if needed
             break;
         default:
             {

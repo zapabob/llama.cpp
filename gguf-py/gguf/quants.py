@@ -654,6 +654,195 @@ class TQ2_0(__Quant, qtype=GGMLQuantizationType.TQ2_0):
         return (d * qs.astype(np.float32))
 
 
+_TQ4_1S_CENTROIDS = np.array(
+    [
+        -2.732590,
+        -2.069017,
+        -1.618046,
+        -1.256231,
+        -0.942340,
+        -0.656759,
+        -0.388048,
+        -0.128395,
+        0.128395,
+        0.388048,
+        0.656759,
+        0.942340,
+        1.256231,
+        1.618046,
+        2.069017,
+        2.732590,
+    ],
+    dtype=np.float32,
+)
+_TQ4_1S_MIDPOINTS = np.array(
+    [
+        -2.400804,
+        -1.843532,
+        -1.437139,
+        -1.099286,
+        -0.799550,
+        -0.522404,
+        -0.258222,
+        0.0,
+        0.258222,
+        0.522404,
+        0.799550,
+        1.099286,
+        1.437139,
+        1.843532,
+        2.400804,
+    ],
+    dtype=np.float32,
+)
+_TQ4_1S_SIGNS = np.array(
+    [
+        +1.0,
+        -1.0,
+        +1.0,
+        -1.0,
+        +1.0,
+        +1.0,
+        -1.0,
+        +1.0,
+        -1.0,
+        -1.0,
+        +1.0,
+        -1.0,
+        +1.0,
+        +1.0,
+        -1.0,
+        +1.0,
+        -1.0,
+        -1.0,
+        +1.0,
+        -1.0,
+        +1.0,
+        -1.0,
+        -1.0,
+        +1.0,
+        -1.0,
+        +1.0,
+        +1.0,
+        -1.0,
+        +1.0,
+        -1.0,
+        -1.0,
+        +1.0,
+    ],
+    dtype=np.float32,
+)
+_TQ4_1S_SCALE_CANDIDATES = np.array([0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.35, 1.5], dtype=np.float32)
+_TQ4_1S_INV_SQRT32 = np.float32(1.0 / np.sqrt(32.0))
+
+
+def _tq4_1s_fwht32(rows: np.ndarray) -> np.ndarray:
+    out = np.array(rows, dtype=np.float32, copy=True)
+    step = 1
+    while step < 32:
+        span = step << 1
+        reshaped = out.reshape(out.shape[0], -1, span)
+        left = reshaped[:, :, :step].copy()
+        right = reshaped[:, :, step:].copy()
+        reshaped[:, :, :step] = left + right
+        reshaped[:, :, step:] = left - right
+        step = span
+    return out
+
+
+def _tq4_1s_rht_forward(rows: np.ndarray) -> np.ndarray:
+    signed = np.array(rows, dtype=np.float32, copy=True) * _TQ4_1S_SIGNS.reshape(1, 32)
+    return _tq4_1s_fwht32(signed) * _TQ4_1S_INV_SQRT32
+
+
+def _tq4_1s_rht_inverse(rows: np.ndarray) -> np.ndarray:
+    transformed = _tq4_1s_fwht32(rows) * _TQ4_1S_INV_SQRT32
+    return transformed * _TQ4_1S_SIGNS.reshape(1, 32)
+
+
+def _tq4_1s_choose_indices(values: np.ndarray) -> np.ndarray:
+    return np.searchsorted(_TQ4_1S_MIDPOINTS, values, side="right").astype(np.uint8)
+
+
+class TQ4_1S(__Quant, qtype=GGMLQuantizationType.TQ4_1S):
+    @classmethod
+    def quantize_blocks(cls, blocks: np.ndarray) -> np.ndarray:
+        rotated = _tq4_1s_rht_forward(blocks)
+        half0 = rotated[:, :16]
+        half1 = rotated[:, 16:]
+
+        rms0 = np.sqrt(np.mean(np.square(half0), axis=1, keepdims=True, dtype=np.float32), dtype=np.float32)
+        rms1 = np.sqrt(np.mean(np.square(half1), axis=1, keepdims=True, dtype=np.float32), dtype=np.float32)
+
+        best_d0 = rms0.copy()
+        best_d1 = rms1.copy()
+        best_err = np.full((blocks.shape[0], 1), np.inf, dtype=np.float32)
+
+        for scale in _TQ4_1S_SCALE_CANDIDATES:
+            d0 = rms0 * scale
+            d1 = rms1 * scale
+            with np.errstate(divide="ignore", invalid="ignore"):
+                inv0 = np.where(d0 > 1.0e-10, np.float32(1.0) / d0, np.float32(0.0))
+                inv1 = np.where(d1 > 1.0e-10, np.float32(1.0) / d1, np.float32(0.0))
+            idx0 = _tq4_1s_choose_indices(half0 * inv0)
+            idx1 = _tq4_1s_choose_indices(half1 * inv1)
+            recon0 = _TQ4_1S_CENTROIDS[idx0] * d0
+            recon1 = _TQ4_1S_CENTROIDS[idx1] * d1
+            err = (
+                np.sum(np.square(half0 - recon0), axis=1, keepdims=True, dtype=np.float32)
+                + np.sum(np.square(half1 - recon1), axis=1, keepdims=True, dtype=np.float32)
+            )
+            use_candidate = err < best_err
+            best_err = np.where(use_candidate, err, best_err)
+            best_d0 = np.where(use_candidate, d0, best_d0)
+            best_d1 = np.where(use_candidate, d1, best_d1)
+
+        for _ in range(6):
+            with np.errstate(divide="ignore", invalid="ignore"):
+                inv0 = np.where(best_d0 > 1.0e-10, np.float32(1.0) / best_d0, np.float32(0.0))
+                inv1 = np.where(best_d1 > 1.0e-10, np.float32(1.0) / best_d1, np.float32(0.0))
+            idx0 = _tq4_1s_choose_indices(half0 * inv0)
+            idx1 = _tq4_1s_choose_indices(half1 * inv1)
+            c0 = _TQ4_1S_CENTROIDS[idx0]
+            c1 = _TQ4_1S_CENTROIDS[idx1]
+            num0 = np.sum(half0 * c0, axis=1, keepdims=True, dtype=np.float32)
+            den0 = np.sum(np.square(c0), axis=1, keepdims=True, dtype=np.float32)
+            num1 = np.sum(half1 * c1, axis=1, keepdims=True, dtype=np.float32)
+            den1 = np.sum(np.square(c1), axis=1, keepdims=True, dtype=np.float32)
+            best_d0 = np.where(den0 > 1.0e-10, num0 / den0, best_d0)
+            best_d1 = np.where(den1 > 1.0e-10, num1 / den1, best_d1)
+
+        with np.errstate(divide="ignore", invalid="ignore"):
+            inv0 = np.where(best_d0 > 1.0e-10, np.float32(1.0) / best_d0, np.float32(0.0))
+            inv1 = np.where(best_d1 > 1.0e-10, np.float32(1.0) / best_d1, np.float32(0.0))
+        idx0 = _tq4_1s_choose_indices(half0 * inv0)
+        idx1 = _tq4_1s_choose_indices(half1 * inv1)
+
+        indices = np.empty((blocks.shape[0], 32), dtype=np.uint8)
+        indices[:, :16] = idx0
+        indices[:, 16:] = idx1
+        packed_qs = indices[:, 0::2] | (indices[:, 1::2] << np.uint8(4))
+
+        d0 = np.ascontiguousarray(best_d0.astype(np.float16)).view(np.uint8).reshape(blocks.shape[0], 2)
+        d1 = np.ascontiguousarray(best_d1.astype(np.float16)).view(np.uint8).reshape(blocks.shape[0], 2)
+        return np.concatenate([d0, d1, packed_qs], axis=1)
+
+    @classmethod
+    def dequantize_blocks(cls, blocks: np.ndarray) -> np.ndarray:
+        d0 = np.ascontiguousarray(blocks[:, :2]).view(np.float16).astype(np.float32).reshape(-1, 1)
+        d1 = np.ascontiguousarray(blocks[:, 2:4]).view(np.float16).astype(np.float32).reshape(-1, 1)
+        qs = blocks[:, 4:]
+
+        indices = np.empty((blocks.shape[0], 32), dtype=np.uint8)
+        indices[:, 0::2] = qs & np.uint8(0x0F)
+        indices[:, 1::2] = (qs >> np.uint8(4)) & np.uint8(0x0F)
+
+        rotated = _TQ4_1S_CENTROIDS[indices].astype(np.float32)
+        rotated[:, :16] *= d0
+        rotated[:, 16:] *= d1
+        return _tq4_1s_rht_inverse(rotated)
+
+
 class MXFP4(__Quant, qtype=GGMLQuantizationType.MXFP4):
     # e2m1 values (doubled)
     # ref: https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf

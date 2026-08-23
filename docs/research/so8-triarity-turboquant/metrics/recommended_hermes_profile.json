@@ -1,0 +1,14 @@
+{
+  "k_cache_type_public": "triality-vector",
+  "k_mode": "key_only_block_so8_triality_vector",
+  "k_view": "vector",
+  "llama_arg_cache_type_k": "q8_0",
+  "llama_arg_cache_type_v": "turbo3",
+  "reason": "production K vector audit passed; V uses the smallest passing protected TurboQuant tier",
+  "recommended_profile": "triality_vector_v_turbo3",
+  "triality_view": "vector",
+  "turbo_layer_adaptive": "7",
+  "v_cache_type_public": "turbo3",
+  "v_hidden_cosine_mean": 0.9887652264700996,
+  "v_recommended_bits": 3.0
+}

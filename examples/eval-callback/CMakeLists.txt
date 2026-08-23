@@ -5,7 +5,7 @@ target_link_libraries(${TARGET} PRIVATE llama-common llama ${CMAKE_THREAD_LIBS_I
 target_compile_features(${TARGET} PRIVATE cxx_std_17)
 
 if(LLAMA_BUILD_TESTS)
-    if(NOT ${CMAKE_SYSTEM_PROCESSOR} MATCHES "s390x")
+    if(NOT "${CMAKE_SYSTEM_PROCESSOR}" MATCHES "s390x")
         set(MODEL_NAME "tinyllamas/stories15M-q4_0.gguf")
         set(MODEL_HASH "SHA256=66967fbece6dbe97886593fdbb73589584927e29119ec31f08090732d1861739")
     else()

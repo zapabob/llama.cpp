@@ -207,7 +207,6 @@ struct common_chat_msg_delimiters {
 
     void tokenize(const llama_vocab * vocab);
 
-    // split tokens into message spans. skips maps a start index to a length of a region to jump over without matching
     common_chat_msg_spans split(const llama_tokens & tokens, const std::map<size_t, size_t> & skips = {}) const;
 
     common_json to_json() const;

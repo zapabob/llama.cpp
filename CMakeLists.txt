@@ -144,6 +144,7 @@ option(LLAMA_TESTS_INSTALL "llama: install tests" ON)
 option(LLAMA_OPENSSL    "llama: use openssl to support HTTPS" ON)
 option(LLAMA_SUBPROCESS "llama-common: use subprocess, required by server tools and server router mode" ${LLAMA_SUBPROCESS_DEFAULT})
 option(LLAMA_LLGUIDANCE "llama-common: include LLGuidance library for structured output in common utils" OFF)
+option(LLAMA_TURBOQUANT "llama: enable TurboQuant CUDA tooling/integration" ON)
 
 
 # Required for relocatable CMake package
@@ -271,7 +272,9 @@ set(LLAMA_BIN_INSTALL_DIR     ${CMAKE_INSTALL_BINDIR}     CACHE PATH "Location o
 
 set(LLAMA_PUBLIC_HEADERS
     ${CMAKE_CURRENT_SOURCE_DIR}/include/llama.h
-    ${CMAKE_CURRENT_SOURCE_DIR}/include/llama-cpp.h)
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/llama-cpp.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/llama-turboquant.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/llama-turboquant-telemetry.h)
 
 set_target_properties(llama
     PROPERTIES

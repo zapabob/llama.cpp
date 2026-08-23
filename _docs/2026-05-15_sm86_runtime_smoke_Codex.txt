@@ -1,0 +1,35 @@
+# sm86 runtime smoke check
+timestamp_local=2026-05-15T13:50:09.0392153+09:00
+build_dir=H:\llama-cpp-zapabob-upstream-20260515-build\bin
+install_performed=false
+
+## file inventory
+
+Name                   Length LastWriteTime
+----                   ------ -------------
+llama-server.exe      1759744 2026/05/15 13:45:45
+llama-cli.exe          729088 2026/05/15 13:45:38
+llama-turboquant.exe    88064 2026/05/15 13:45:39
+ggml-cuda.dll        53883904 2026/05/15 13:33:18
+llama.dll             1973248 2026/05/15 13:34:29
+llama-common.dll      8995840 2026/05/15 13:45:14
+
+
+
+
+## llama-server --version
+version: 9200 (b6184ab44)
+built with MSVC 19.44.35224.0 for Windows AMD64
+
+## llama-cli --version
+version: 9200 (b6184ab44)
+built with MSVC 19.44.35224.0 for Windows AMD64
+
+## llama-turboquant usage smoke
+Usage:
+  llama-turboquant train --out <artifact.tq> [--head-dim N] [--vecs N] [--seed N] [--so8-learned 0|1] [--triality 0|1]
+  llama-turboquant eval  --artifact <artifact.tq> [--vecs N] [--seed N]
+llama-turboquant_exit_code=2
+
+## nvidia-smi
+NVIDIA GeForce RTX 3060, 8.6, 596.49

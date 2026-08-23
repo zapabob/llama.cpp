@@ -4,6 +4,7 @@
 #include "llama-cpp.h"
 
 #include <clocale>
+#include <filesystem>
 #include <random>
 #include <vector>
 
@@ -362,6 +363,14 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
+    bool remove_state_file = false;
+    if (params.out_file == "dump_state.bin") {
+        params.out_file = (std::filesystem::temp_directory_path() / "llama-test-save-load-state.bin").string();
+        remove_state_file = true;
+        std::error_code error;
+        std::filesystem::remove(params.out_file, error);
+    }
+
     if (params.n_parallel == 1) {
         LOG_TRC("%s: n_parallel == 1, enabling unified kv cache\n", __func__);
         params.kv_unified = true;
@@ -435,6 +444,11 @@ int main(int argc, char ** argv) {
     }
 
     LOG("\nAll tests passed.\n");
+
+    if (remove_state_file) {
+        std::error_code error;
+        std::filesystem::remove(params.out_file, error);
+    }
 
     return 0;
 }

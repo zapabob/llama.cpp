@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstring>
 #include <random>
+#include <limits>
 #include <utility>
 #include <vector>
 
@@ -280,13 +281,15 @@ void diffusion_generate(llama_context *          ctx,
                 break;
             }
 
+            GGML_ASSERT(mask_positions.size() <= static_cast<size_t>(std::numeric_limits<int32_t>::max()));
+
             if (params.add_gumbel_noise && params.temperature > 0.0f) {
                 add_gumbel_noise(logits, n_vocab, params.temperature, rng);
             }
 
             if (params.algorithm == DIFFUSION_ALGORITHM_ORIGIN) {
                 int32_t transfer_count = calculate_transfer_count(
-                    step, steps_per_block, mask_positions.size(), params.schedule, params.eps, num_transfer_tokens);
+                    step, steps_per_block, static_cast<int32_t>(mask_positions.size()), params.schedule, params.eps, num_transfer_tokens);
                 float p_transfer = (float) transfer_count / mask_positions.size();
 
                 for (int32_t pos : mask_positions) {
@@ -336,11 +339,11 @@ void diffusion_generate(llama_context *          ctx,
                     float conf = calculate_confidence(cur_p, params.algorithm, rng);
 
                     sampled_tokens[i] = sampled_token;
-                    confidences.emplace_back(conf, i);
+                    confidences.emplace_back(conf, static_cast<int32_t>(i));
                 }
 
                 int32_t transfer_count = calculate_transfer_count(
-                    step, steps_per_block, mask_positions.size(), params.schedule, params.eps, num_transfer_tokens);
+                    step, steps_per_block, static_cast<int32_t>(mask_positions.size()), params.schedule, params.eps, num_transfer_tokens);
 
                 if (transfer_count > 0) {
                     if (params.alg_temp == 0.0f) {

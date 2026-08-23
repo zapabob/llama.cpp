@@ -932,9 +932,15 @@ std::string LLM_KV::operator()(llm_kv kv) const {
 }
 
 LLM_TN_IMPL::LLM_TN_IMPL(llm_arch arch, llm_tensor tensor, const char * suffix, int bid, int xid)
-    : arch(arch), tensor(tensor), suffix(suffix), bid(bid), xid(xid) {}
+    : arch(arch), tensor(tensor), suffix(suffix), bid(bid), xid(xid), name_override() {}
+
+LLM_TN_IMPL::LLM_TN_IMPL(llm_arch arch, llm_tensor tensor, int bid, std::string name_override)
+    : arch(arch), tensor(tensor), suffix(nullptr), bid(bid), xid(-1), name_override(std::move(name_override)) {}
 
 std::string LLM_TN_IMPL::str() const {
+    if (!name_override.empty()) {
+        return name_override;
+    }
     if (LLM_TENSOR_NAMES.find(tensor) == LLM_TENSOR_NAMES.end()) {
         GGML_ABORT("unknown tensor name for tensor id %d", static_cast<int>(tensor));
     }
